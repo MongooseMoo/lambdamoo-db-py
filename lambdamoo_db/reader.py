@@ -92,7 +92,7 @@ class Reader:
         logger.debug("Parsing v4 database")
         db.total_objects = self.readInt()
         db.total_verbs = self.readInt()
-        self.readString()  # dummy
+        db.v4_dummy = self.readString()
         self.readPlayers(db)
         self.readObjects(db)
         self.readVerbs(db)
@@ -262,7 +262,7 @@ class Reader:
         logger.debug(f"Reading object #{oid} at line {line_at_start}")
         name = self.readString()
         logger.debug(f"  name = {name!r}")
-        self.readString()  # blankline
+        blank_line = self.readString()
         flags = self.readInt()
         logger.debug(f"  flags = {flags}")
         owner = self.readObjnum()
@@ -283,6 +283,11 @@ class Reader:
             location=location,
             parents=[parent],
         )
+        obj.v4_blank_line = blank_line
+        obj.v4_first_content = firstContent
+        obj.v4_neighbor = neighbor
+        obj.v4_first_child = firstChild
+        obj.v4_sibling = sibling
         numVerbs = self.readInt()
         logger.debug(f"  verbs count = {numVerbs}")
         for _ in range(numVerbs):
@@ -369,7 +374,10 @@ class Reader:
             return False
         count = int(match.group("count"))
         logger.debug(f"Found connections section with {count} connections")
-        self._read_and_process_items(db, count, lambda _: self.readString())
+        db.has_connections_section = True
+        db.connections_with_listeners = match.group("listener_tag")
+        for _ in range(count):
+            db.connections.append(self.readString())
         return True
 
     def readVerbs(self, db: MooDatabase) -> None:
@@ -559,22 +567,24 @@ class Reader:
         activation.programmer = int(headerMatch[6])
         activation.vloc = int(headerMatch[7])
         activation.unused4 = int(headerMatch[8])
-        activation.debug = bool(headerMatch[9])
-        self.readString()  # /* Was argstr*/
-        self.readString()  # /* Was dobjstr*/
-        self.readString()  # /* Was prepstr*/
-        self.readString()  # /* Was iobjstr*/
+        activation.debug = int(headerMatch[9])
+        activation.argstr = self.readString()
+        activation.dobjstr = self.readString()
+        activation.prepstr = self.readString()
+        activation.iobjstr = self.readString()
         activation.verb = self.readString()
         activation.verbname = self.readString()
         return activation
 
     def read_activation(self, db: MooDatabase) -> Activation:
+        language_version = db.version
         if db.version < DBVersions.DBV_Float:
             pass
         else:
             langver = self.readString()
             if not (langverMatch := langverRe.match(langver)):
                 self.parse_error(f"Bad language version header {langver}")
+            language_version = int(langverMatch.group("version"))
 
         code = self.readCode()
         rt = self.readRTEnv(db)
@@ -587,6 +597,7 @@ class Reader:
             _s = self.readValue(db)
             stack.append(_s)
         activation = self.read_activation_as_pi(db)
+        activation.language_version = language_version
         activation.stack = stack
         activation.code = code
         activation.rtEnv = rt  # Store runtime environment
