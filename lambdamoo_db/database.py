@@ -137,6 +137,9 @@ class Waif:
 class WaifReference:
     index: int
 
+    def __hash__(self):
+        return hash(self.index)
+
 
 @attrs.define()
 class Activation:

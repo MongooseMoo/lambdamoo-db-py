@@ -51,7 +51,7 @@ pendingValueRe = compile_re(templates.pending_values_count)
 suspendedTaskCountRe = compile_re(templates.suspended_task_count)
 # Use raw regex for suspended task header - the parse template was broken
 # Format: "startTime id [value_type]" where value_type is optional
-suspendedTaskHeaderRe = re.compile(r"(?P<startTime>\d+) (?P<id>\d+)(?: (?P<value>\d+))?")
+suspendedTaskHeaderRe = re.compile(r"(?P<startTime>-?\d+) (?P<id>\d+)(?: (?P<value>\d+))?")
 interruptedTaskCountRe = compile_re(templates.interrupted_task_count)
 interruptedTaskHeaderRe = re.compile(r"(?P<id>\d+) (?P<status>[\w\W]+)")
 vmHeaderRe = compile_re(templates.vm_header)
