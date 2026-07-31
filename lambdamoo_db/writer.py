@@ -278,18 +278,11 @@ class Writer:
             self.write(self._nl)
 
     def writePending(self) -> None:
-        # Get pending anon IDs if set (for pre-creating anon objects)
-        pending_anon_ids = getattr(self.db, 'pending_anon_ids', [])
-
-        self.writeString(templates.pending_values_count.format(count=len(pending_anon_ids)))
-
-        # Write each pending anon as a TYPE_ANON value
-        # Format: type_code (12) + object_id
-        for anon_id in pending_anon_ids:
-            self.writeInt(MooTypes.ANON)
-            self.write(self._nl)
-            self.writeInt(anon_id)
-            self.write(self._nl)
+        self.writeString(
+            templates.pending_values_count.format(count=len(self.db.pending_values))
+        )
+        for value in self.db.pending_values:
+            self.writeValue(value)
 
     def writeObjects(self) -> None:
         # Write total count (includes recycled slots)

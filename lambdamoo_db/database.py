@@ -233,7 +233,7 @@ class MooDatabase:
     waifs: dict[int, Waif] = attrs.field(factory=dict)
     players: list[int] = attrs.field(factory=list)
     recycled_objects: set[int] = attrs.field(factory=set)
-    pending_anon_ids: list[int] = attrs.field(factory=list)  # For pre-creating anons in pending section
+    pending_values: list[Any] = attrs.field(factory=list)
     connections: list[str] = attrs.field(factory=list)  # Connection lines for roundtrip
     connections_with_listeners: str = attrs.field(default=" with listeners")  # Listener tag suffix
     line_ending: str = attrs.field(default="\n")  # Line ending style for roundtrip (\n or \r\n)
