@@ -79,17 +79,16 @@ class Reader:
         if not version:
             self.parse_error("Invalid version string")
         db.version = int(version.group("version"))
-        match db.version:
-            case 4:
-                self.parse_v4(db)
-            case 17:
-                self.parse_v17(db)
-            case _:
-                self.parse_error(f"Unknown db version {db.version}")
+        if DBVersions.DBV_Exceptions <= db.version < DBVersions.DBV_NextGen:
+            self.parse_v4(db)
+        elif db.version == DBVersions.DBV_Bool:
+            self.parse_v17(db)
+        else:
+            self.parse_error(f"Unknown db version {db.version}")
         return db
 
     def parse_v4(self, db: MooDatabase) -> None:
-        logger.debug("Parsing v4 database")
+        logger.debug("Parsing pre-next-generation database")
         db.total_objects = self.readInt()
         db.total_verbs = self.readInt()
         db.v4_dummy = self.readString()
@@ -433,7 +432,11 @@ class Reader:
 
     def readObjects(self, db: MooDatabase) -> None:
         db.objects = {}
-        reader = self.readObject_v4 if db.version == 4 else self.readObject_ng
+        reader = (
+            self.readObject_v4
+            if db.version < DBVersions.DBV_NextGen
+            else self.readObject_ng
+        )
         for _ in range(db.total_objects):
             obj = reader(db)
             if not obj:

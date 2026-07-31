@@ -259,7 +259,7 @@ class Writer:
             raise TypeError(f"Unsupported value type: {type(v).__name__}")
 
     def writeDatabase(self) -> None:
-        if self.db.version == 4:
+        if DBVersions.DBV_Exceptions <= self.db.version < DBVersions.DBV_NextGen:
             self.writeDatabaseV4()
             return
 
