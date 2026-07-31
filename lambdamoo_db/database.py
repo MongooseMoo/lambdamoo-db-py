@@ -11,12 +11,10 @@ class ObjNum(int):
         return f"ObjNum({int(self)})"
 
     def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
+        return type(other) is ObjNum and int(self) == int(other)
 
     def __hash__(self):
-        return hash(int(self))
+        return hash((ObjNum, int(self)))
 
 
 class Anon(int):
@@ -24,45 +22,37 @@ class Anon(int):
         return f"Anon({int(self)})"
 
     def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
+        return type(other) is Anon and int(self) == int(other)
 
     def __hash__(self):
-        return hash(int(self))
+        return hash((Anon, int(self)))
 
 
 class MooError(int):
     """Wrapper for MOO error values (TYPE_ERR)."""
     def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
+        return type(other) is MooError and int(self) == int(other)
 
     def __hash__(self):
-        return hash(int(self))
+        return hash((MooError, int(self)))
 
 
 class MooCatch(int):
     """Wrapper for MOO _CATCH values to preserve type during roundtrip."""
     def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
+        return type(other) is MooCatch and int(self) == int(other)
 
     def __hash__(self):
-        return hash(int(self))
+        return hash((MooCatch, int(self)))
 
 
 class MooFinally(int):
     """Wrapper for MOO _FINALLY values to preserve type during roundtrip."""
     def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
+        return type(other) is MooFinally and int(self) == int(other)
 
     def __hash__(self):
-        return hash(int(self))
+        return hash((MooFinally, int(self)))
 
 
 class Clear:
