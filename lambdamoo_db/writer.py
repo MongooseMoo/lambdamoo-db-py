@@ -135,6 +135,16 @@ class Writer:
             write_index = len(self._written_waifs)
             self._written_waifs[original_index] = write_index
             waif = self.db.waifs[original_index]
+            props = [
+                prop
+                if (
+                    isinstance(prop, tuple)
+                    and len(prop) == 2
+                    and isinstance(prop[0], int)
+                )
+                else (slot_idx, prop)
+                for slot_idx, prop in enumerate(waif.props)
+            ]
 
             # Header: "c {write_index}" (c = creation/definition)
             self.writeString(f"c {write_index}")
@@ -145,10 +155,9 @@ class Writer:
             self.writeInt(waif.owner)
             self.write(self._nl)
             # propdefs_length (original from the file)
-            self.writeInt(waif.propdefs_length)
+            self.writeInt(waif.propdefs_length or len(props))
             self.write(self._nl)
-            # Property slot indices and values - stored as (slot_idx, value) tuples
-            for slot_idx, prop_value in waif.props:
+            for slot_idx, prop_value in props:
                 self.writeInt(slot_idx)
                 self.write(self._nl)
                 self.writeValue(prop_value)
