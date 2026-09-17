@@ -5,7 +5,12 @@ import re
 import shutil
 from typing import Any, Optional
 import cattrs
-from lambdamoo_db.database import ObjNum, WaifReference, MooDatabase
+from lambdamoo_db.database import Anon, MooCatch, MooError, MooFinally, ObjNum, WaifReference, MooDatabase
+
+
+_json_converter = cattrs.Converter()
+for _scalar_type in (ObjNum, Anon, MooError, MooCatch, MooFinally):
+    _json_converter.register_unstructure_hook(_scalar_type, int)
 
 
 ILLEGAL_NAMES = [
@@ -37,6 +42,8 @@ ILLEGAL_NAMES = [
 
 
 def converter(x: Any) -> Any:
+    if isinstance(x, (ObjNum, Anon, MooError, MooCatch, MooFinally)):
+        return int(x)
     if isinstance(x, WaifReference):
         return f"WAIF({x.index})"
 
@@ -49,11 +56,11 @@ def sanitize(filename: str) -> str:
 
 
 def to_json(db: MooDatabase) -> str:
-    return json.dumps(cattrs.unstructure(db), indent=2, default=converter)
+    return json.dumps(_json_converter.unstructure(db), indent=2, default=converter)
 
 
 def to_json_file(db: MooDatabase, f: TextIOWrapper, indent: Optional[int] = None) -> None:
-    json.dump(cattrs.unstructure(db), f, indent=indent, default=converter)
+    json.dump(_json_converter.unstructure(db), f, indent=indent, default=converter)
 
 
 def to_moo_files(db: MooDatabase, path: str, corrify: bool) -> None:
@@ -64,13 +71,13 @@ def to_moo_files(db: MooDatabase, path: str, corrify: bool) -> None:
     names = {}
     if corrify:
         for p in db.objects[0].properties:
-            if p.propertyName and isinstance(p.value, ObjNum) and not p.value in names:
-                names[p.value] = "$" + p.propertyName
+            if p.propertyName and isinstance(p.value, ObjNum) and int(p.value) not in names:
+                names[int(p.value)] = "$" + p.propertyName
 
     def name(i: int | ObjNum) -> str:
         id = str(i)
-        if corrify and i in names:
-            id = names[i]
+        if corrify and int(i) in names:
+            id = names[int(i)]
         return id
 
     for i, o in db.objects.items():
@@ -89,9 +96,9 @@ def to_moo_files(db: MooDatabase, path: str, corrify: bool) -> None:
             if len(o.parents) < 2:
                 info["parent"] = o.parent
 
-            json.dump(info, f, indent=2)
+            json.dump(_json_converter.unstructure(info), f, indent=2, default=converter)
         with open(os.path.join(path, id, "props.json"), "w") as f:
-            json.dump(cattrs.unstructure(o.properties), f, indent=2, default=converter)
+            json.dump(_json_converter.unstructure(o.properties), f, indent=2, default=converter)
 
         for i, v in enumerate(o.verbs):
             filename = (sanitize(v.name) or str(i)).split(" ", 1)[0] + ".moo"
