@@ -442,7 +442,7 @@ class Reader:
             if len(parent.parents) > 1:
                 # todo: Identify order of multi-inheritence
                 break
-            parent = db.objects.get(parent.parent)
+            parent = db.objects.get(int(parent.parent))
         i = 1
         for p in obj.properties:
             try:

@@ -3,66 +3,41 @@ import attrs
 from .enums import MooTypes, ObjectFlags, PropertyFlags
 
 
-class ObjNum(int):
-    def __str__(self):
+@attrs.frozen(repr=False)
+class _TypedScalar:
+    """A tagged MOO scalar, distinct from Python numeric values."""
+
+    value: int = attrs.field(converter=int)
+
+    def __int__(self) -> int:
+        return self.value
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.value})"
+
+
+class ObjNum(_TypedScalar):
+    def __str__(self) -> str:
         return f"#{int(self)}"
 
-    def __repr__(self):
-        return f"ObjNum({int(self)})"
 
-    def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
-
-    def __hash__(self):
-        return hash(int(self))
+class Anon(_TypedScalar):
+    """Anonymous-object dump reference (TYPE_ANON)."""
 
 
-class Anon(int):
-    def __repr__(self):
-        return f"Anon({int(self)})"
-
-    def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
-
-    def __hash__(self):
-        return hash(int(self))
+class MooError(_TypedScalar):
+    """MOO error value (TYPE_ERR)."""
 
 
-class MooError(int):
-    """Wrapper for MOO error values (TYPE_ERR)."""
-    def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
-
-    def __hash__(self):
-        return hash(int(self))
+class MooCatch(_TypedScalar):
+    """MOO runtime catch value (TYPE_CATCH)."""
 
 
-class MooCatch(int):
-    """Wrapper for MOO _CATCH values to preserve type during roundtrip."""
-    def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
-
-    def __hash__(self):
-        return hash(int(self))
-
-
-class MooFinally(int):
-    """Wrapper for MOO _FINALLY values to preserve type during roundtrip."""
-    def __eq__(self, other):
-        if isinstance(other, int):
-            return int(self) == int(other)
-        return NotImplemented
-
-    def __hash__(self):
-        return hash(int(self))
+class MooFinally(_TypedScalar):
+    """MOO runtime finally value (TYPE_FINALLY)."""
 
 
 class Clear:
