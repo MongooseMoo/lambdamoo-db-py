@@ -492,7 +492,8 @@ class Reader:
     def readPending(self, db: MooDatabase) -> None:
         valueMatch = self._read_and_match(pendingValueRe, "Bad pending finalizations")
         finalizationCount = int(valueMatch.group("count"))
-        self._read_and_process_items(db, finalizationCount, lambda _: self.readValue(db))
+        for _ in range(finalizationCount):
+            db.pending_values.append(self.readValue(db))
 
     def readClocks(self, db: MooDatabase) -> None:
         clockMatch = self._read_and_match(clockCountRe, "Could not find clock definitions")
