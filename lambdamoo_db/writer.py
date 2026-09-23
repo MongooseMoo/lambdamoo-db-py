@@ -5,7 +5,7 @@ from typing import Any, SupportsInt
 import attrs
 from attrs import asdict, define
 
-from lambdamoo_db.enums import MooTypes
+from lambdamoo_db.enums import DBVersions, MooTypes
 
 from . import templates
 from .database import (
@@ -268,7 +268,11 @@ class Writer:
             raise TypeError(f"Unsupported value type: {type(v).__name__}")
 
     def writeDatabase(self) -> None:
-        self.writeString(templates.version.format(version=17))
+        if DBVersions.DBV_Exceptions <= self.db.version < DBVersions.DBV_NextGen:
+            self.writeDatabaseV4()
+            return
+
+        self.writeString(self.db.versionstring)
         self.writePlayers()
         self.writePending()
         self.writeClocks()
@@ -278,6 +282,22 @@ class Writer:
         self.writeConnections()
         self.writeObjects()
         self.writeVerbs()
+
+    def writeDatabaseV4(self) -> None:
+        self.writeString(self.db.versionstring)
+        self.writeInt(self.db.total_objects)
+        self.write(self._nl)
+        self.writeInt(self.db.total_verbs)
+        self.write(self._nl)
+        self.writeString(self.db.v4_dummy)
+        self.writePlayers()
+        self.writeObjectsV4()
+        self.writeVerbs(include_count=False)
+        self.writeClocks()
+        self.writeTaskQueue()
+        self.writeSuspendedTasks()
+        if self.db.has_connections_section:
+            self.writeConnections()
 
     def writePlayers(self) -> None:
         self.writeInt(len(self.db.players))
@@ -323,6 +343,34 @@ class Writer:
         # Write 0 to signal end of anonymous objects
         self.writeInt(0)
         self.write(self._nl)
+
+    def writeObjectsV4(self) -> None:
+        for obj_id in range(self.db.total_objects):
+            if obj_id in self.db.recycled_objects:
+                self.writeString(f"# {obj_id} recycled")
+            elif obj_id in self.db.objects:
+                self.writeObjectV4(self.db.objects[obj_id])
+            else:
+                raise ValueError(f"Object {obj_id} missing and not marked recycled")
+
+    def writeObjectV4(self, obj: MooObject) -> None:
+        self.writeString(f"#{obj.id}")
+        self.writeString(obj.name)
+        self.writeString(obj.v4_blank_line)
+        for value in (
+            obj.flags,
+            obj.owner,
+            obj.location,
+            obj.v4_first_content,
+            obj.v4_neighbor,
+            obj.parent,
+            obj.v4_first_child,
+            obj.v4_sibling,
+        ):
+            self.writeInt(value)
+            self.write(self._nl)
+        self.writeCollection(obj.verbs, writer=self.writeVerbMetadata)
+        self.write_properties(obj)
 
     def writeObject(self, obj: MooObject) -> None:
         obj_num = obj.id
@@ -399,11 +447,12 @@ class Writer:
         self.writeInt(prop.perms)
         self.write(self._nl)
 
-    def writeVerbs(self) -> None:
+    def writeVerbs(self, include_count: bool = True) -> None:
         # Count verbs with programs (None = no program, [] = empty program)
         verbs_with_programs = [v for v in self.db.all_verbs() if v.code is not None]
-        self.writeInt(len(verbs_with_programs))
-        self.write(self._nl)
+        if include_count:
+            self.writeInt(len(verbs_with_programs))
+            self.write(self._nl)
         # Write each verb program
         for verb in verbs_with_programs:
             self.writeVerb(verb)
@@ -451,27 +500,31 @@ class Writer:
         # 1. temp_value (first value, often discarded during interpretation)
         self.writeValue(activation.temp_value)
         # 2. temp_this (pre-header this, with type info)
-        self.writeValue(activation.temp_this)
+        if self.db.version >= DBVersions.DBV_This:
+            self.writeValue(activation.temp_this)
         # 3. temp_vloc (pre-header vloc, with type info)
-        self.writeValue(activation.temp_vloc)
+        if self.db.version >= DBVersions.DBV_Anon:
+            self.writeValue(activation.temp_vloc)
         # 4. threaded (just an int, no type tag for v17)
-        self.writeInt(activation.threaded if activation.threaded is not None else 0)
-        self.write(self._nl)
+        if self.db.version >= DBVersions.DBV_Threaded:
+            self.writeInt(activation.threaded if activation.threaded is not None else 0)
+            self.write(self._nl)
         # Activation header line
         activation_header = templates.activation_header.format(**asdict(activation))
         self.writeString(activation_header)
         # Argstr placeholders
-        self.writeString("No")
-        self.writeString("More")
-        self.writeString("Parse")
-        self.writeString("Infos")
+        self.writeString(activation.argstr)
+        self.writeString(activation.dobjstr)
+        self.writeString(activation.prepstr)
+        self.writeString(activation.iobjstr)
         self.writeString(activation.verb)
         self.writeString(activation.verbname)
 
     def writeActivation(self, activation):
         # Write language version
-        langver = templates.langver.format(version=17)
-        self.writeString(langver)
+        if self.db.version >= DBVersions.DBV_Float:
+            language_version = activation.language_version or self.db.version
+            self.writeString(templates.langver.format(version=language_version))
         # Write code
         self.writeCode(activation.code)
         # Write runtime environment
@@ -515,7 +568,8 @@ class Writer:
         self.writeVM(task.vm)
 
     def writeVM(self, vm: VM):
-        self.writeValue(vm.locals)
+        if self.db.version >= DBVersions.DBV_TaskLocal:
+            self.writeValue(vm.locals)
         # Write VM header
         header = templates.vm_header.format(
             top=vm.top, vector=vm.vector, funcId=vm.funcId, maxStackframes=vm.maxStackframes
