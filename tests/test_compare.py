@@ -1017,24 +1017,24 @@ class TestCompareDatabases:
         assert not result.identical
         assert any("anon" in str(d.path) for d in result.diffs)
 
-    def test_pending_anon_ids(self):
-        """Test that pending_anon_ids are compared."""
-        from lambdamoo_db.compare import compare_databases, DiffKind
-        from lambdamoo_db.database import MooDatabase
+    def test_pending_values(self):
+        """Test that pending finalization values are compared."""
+        from lambdamoo_db.compare import compare_databases
+        from lambdamoo_db.database import Anon, MooDatabase
 
         db1 = MooDatabase()
         db1.version = 17
         db1.versionstring = "test"
-        db1.pending_anon_ids = [100, 101, 102]
+        db1.pending_values = [Anon(100), Anon(101), Anon(102)]
 
         db2 = MooDatabase()
         db2.version = 17
         db2.versionstring = "test"
-        db2.pending_anon_ids = [100, 101]
+        db2.pending_values = [Anon(100), Anon(101)]
 
         result = compare_databases(db1, db2)
         assert not result.identical
-        assert any("pending_anon_ids" in str(d.path) for d in result.diffs)
+        assert any("pending_values" in str(d.path) for d in result.diffs)
 
     def test_databases_with_waifs(self):
         from lambdamoo_db.compare import compare_databases
