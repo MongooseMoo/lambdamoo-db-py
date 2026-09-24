@@ -169,8 +169,8 @@ class VM:
 @attrs.define()
 class QueuedTask:
     firstLineno: int
-    id: int
-    st: int
+    id: int  # task id
+    st: int  # start time (Unix seconds)
     unused: int = attrs.field(init=False, default=0)
     value: Any = attrs.field(init=False, default=None)
     activation: Activation | None = attrs.field(init=False)
