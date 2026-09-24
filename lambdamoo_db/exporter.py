@@ -5,10 +5,16 @@ import re
 import shutil
 from typing import Any, Optional
 import cattrs
-from lambdamoo_db.database import Anon, MooCatch, MooError, MooFinally, ObjNum, WaifReference, MooDatabase
+import attrs
+from cattrs.gen import make_dict_unstructure_fn
+from lambdamoo_db.database import Anon, Clear, MooCatch, MooError, MooFinally, ObjNum, WaifReference, MooDatabase
 
 
-_json_converter = cattrs.Converter()
+_json_converter = cattrs.Converter(unstruct_collection_overrides={set: list})
+_json_converter.register_unstructure_hook_factory(
+    attrs.has,
+    lambda cls: make_dict_unstructure_fn(cls, _json_converter, _cattrs_include_init_false=True),
+)
 for _scalar_type in (ObjNum, Anon, MooError, MooCatch, MooFinally):
     _json_converter.register_unstructure_hook(_scalar_type, int)
 
@@ -46,6 +52,9 @@ def converter(x: Any) -> Any:
         return int(x)
     if isinstance(x, WaifReference):
         return f"WAIF({x.index})"
+    if isinstance(x, Clear):
+        return None
+    raise TypeError(f"Object of type {type(x).__name__} is not JSON serializable")
 
 
 def sanitize(filename: str) -> str:
@@ -55,12 +64,22 @@ def sanitize(filename: str) -> str:
     return name
 
 
-def to_json(db: MooDatabase) -> str:
-    return json.dumps(_json_converter.unstructure(db), indent=2, default=converter)
+def to_json_data(value: Any) -> Any:
+    """Unstructure a database or projection using the exporter's scalar hooks.
+
+    Typed MOO scalars become integers, including in nested map keys. This is
+    the legacy, lossy JSON representation, not a database round-trip format.
+    """
+    return _json_converter.unstructure(value)
 
 
-def to_json_file(db: MooDatabase, f: TextIOWrapper, indent: Optional[int] = None) -> None:
-    json.dump(_json_converter.unstructure(db), f, indent=indent, default=converter)
+def to_json(db: Any) -> str:
+    """Serialize a database or a selected projection of reader values."""
+    return json.dumps(to_json_data(db), indent=2, default=converter)
+
+
+def to_json_file(db: Any, f: TextIOWrapper, indent: Optional[int] = None) -> None:
+    json.dump(to_json_data(db), f, indent=indent, default=converter)
 
 
 def to_moo_files(db: MooDatabase, path: str, corrify: bool) -> None:
@@ -96,9 +115,9 @@ def to_moo_files(db: MooDatabase, path: str, corrify: bool) -> None:
             if len(o.parents) < 2:
                 info["parent"] = o.parent
 
-            json.dump(_json_converter.unstructure(info), f, indent=2, default=converter)
+            json.dump(to_json_data(info), f, indent=2, default=converter)
         with open(os.path.join(path, id, "props.json"), "w") as f:
-            json.dump(_json_converter.unstructure(o.properties), f, indent=2, default=converter)
+            json.dump(to_json_data(o.properties), f, indent=2, default=converter)
 
         for i, v in enumerate(o.verbs):
             filename = (sanitize(v.name) or str(i)).split(" ", 1)[0] + ".moo"
