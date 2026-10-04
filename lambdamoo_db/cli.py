@@ -15,6 +15,7 @@ from .inspection import (
     descendants,
     dollar_names,
     find_references,
+    find_strings,
     find_verb,
     format_time,
     format_value,
@@ -356,6 +357,34 @@ def refs(ctx: click.Context, ref: str) -> None:
     target = _object(db, ref)
     for r in find_references(db, target, names):
         click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {r.text}" if r.text else ""))
+
+
+@moodb.command()
+@click.argument("pattern")
+@click.option("-i", "--ignore-case", is_flag=True, help="Case-insensitive match.")
+@click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
+@click.option("--in-waif", "waif_class", metavar="REF", help="Only strings stored inside a waif of class REF or a descendant.")
+@click.pass_context
+def values(ctx: click.Context, pattern: str, ignore_case: bool, fixed_strings: bool, waif_class: str | None) -> None:
+    """Search stored string values (Python regex): OBJ.prop[i]<waif #C>.slot = "text".
+
+    Looks in every object's own property values, anonymous objects included,
+    through lists and maps and into waifs, naming each waif slot. Inherited
+    (clear) slots are not repeated on descendants.
+    """
+    db, names = _db(ctx)
+    try:
+        rx = re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if ignore_case else 0)
+    except re.error as e:
+        raise click.BadParameter(str(e), param_hint="PATTERN")
+    wanted = None
+    if waif_class is not None:
+        cls = _object(db, waif_class)
+        wanted = {cls.id, *(d.id for d in descendants(db, cls))}
+    for hit in find_strings(db, rx):
+        if wanted is not None and not wanted.intersection(hit.waif_classes):
+            continue
+        click.echo(f"{label(db, hit.obj.id, names)}{hit.where} = {moo_string(hit.value)}")
 
 
 def _tree(ctx: click.Context, ref: str, field: str, recursive: bool) -> None:
