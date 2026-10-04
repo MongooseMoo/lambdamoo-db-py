@@ -461,6 +461,74 @@ def find_references(db: MooDatabase, target: MooObject, names: dict[int, str]) -
 
 
 # --------------------------------------------------------------------------
+# Stored values
+
+
+def waif_slot_names(db: MooDatabase, class_id: int) -> list[str]:
+    """Names of a waif class's slots, by slot index, without the leading colon.
+
+    A waif's slots are its class's ``:``-prefixed properties, own first and
+    then each ancestor's (waif.cc gen_waif_propdefs).
+    """
+    cls = db.objects.get(class_id)
+    if cls is None:
+        return []
+    return [p.propertyName[1:] for a in db.ancestors(cls) for p in own_properties(a)
+            if isinstance(p.propertyName, str) and p.propertyName.startswith(":")]
+
+
+@attrs.frozen
+class StoredString:
+    obj: MooObject  # the object whose property holds the value, directly or through waifs
+    where: str  # ".prop[2]<waif #3010>.snd"; list indexes are 1-based like MOO
+    value: str
+    waif_classes: tuple[int, ...]  # classes of the waifs passed through, outermost first
+
+
+def find_strings(db: MooDatabase, pattern: re.Pattern[str]) -> Iterator[StoredString]:
+    """Every stored string matching ``pattern``, with the path to it.
+
+    Searches each object's own (non-clear) property slots, anonymous objects
+    included, through lists, map keys and values, and into waif bodies. A waif
+    held in several places is reported once per holder. A waif that contains
+    itself is entered once per path.
+    """
+    slot_names: dict[int, list[str]] = {}
+
+    def walk(value: Any, where: str, classes: tuple[int, ...], open_waifs: frozenset[int]) -> Iterator[tuple[str, str, tuple[int, ...]]]:
+        if isinstance(value, str):
+            if pattern.search(value):
+                yield where, value, classes
+        elif isinstance(value, list):
+            for i, item in enumerate(value, 1):
+                yield from walk(item, f"{where}[{i}]", classes, open_waifs)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from walk(key, f"{where}.keys[{_format(key)}]", classes, open_waifs)
+                yield from walk(item, f"{where}[{_format(key)}]", classes, open_waifs)
+        elif isinstance(value, WaifReference):
+            waif = db.waifs.get(value.index)
+            if waif is None or value.index in open_waifs:
+                return
+            cls = int(waif.waif_class)
+            if cls not in slot_names:
+                slot_names[cls] = waif_slot_names(db, cls)
+            names = slot_names[cls]
+            for slot, item in waif.props:
+                name = names[slot] if slot < len(names) else f"slot{slot}"
+                yield from walk(item, f"{where}<waif #{cls}>.{name}", (*classes, cls), open_waifs | {value.index})
+
+    for obj in db.objects.values():
+        names = [p.propertyName for a in db.ancestors(obj) for p in own_properties(a)]
+        for index, prop in enumerate(obj.properties):
+            if prop.value is CLEAR:
+                continue
+            name = names[index] if index < len(names) else f"slot{index}"
+            for where, value, classes in walk(prop.value, f".{name}", (), frozenset()):
+                yield StoredString(obj, where, value, classes)
+
+
+# --------------------------------------------------------------------------
 # Tasks
 
 

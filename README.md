@@ -21,6 +21,7 @@ moodb code '$httpd:GET'        # verb source, found through inheritance
 moodb prop '$httpd.port'       # effective value, following clear
 moodb grep -C 2 'notify('      # search all verb code
 moodb refs '$httpd'            # who points at #N, in properties and code
+moodb values '\.ogg$'          # where a string is stored, through lists, maps and waifs
 ```
 
 ### References
@@ -72,6 +73,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `find --verb NAME` | objects defining a verb that a call to NAME would match |
 | `find --prop NAME` | objects defining a property called NAME |
 | `refs REF` | property values holding the object, and verb code lines mentioning `#N` or its `$name` |
+| `values PATTERN [-i] [-F] [--in-waif REF]` | Python regex over every stored string: each object's own property values (anonymous objects included), through lists, map keys and values, and into waifs. Prints the path, e.g. `#4982.systems[10]<waif #4238>.sounds["engage"]<waif #3010>.snd = "..."`, with waif slots named and list indexes 1-based. `--in-waif` keeps only strings inside a waif of that class or a descendant |
 | `children REF [-r]`, `contents REF [-r]` | direct or recursive children / contents |
 | `players` | player objects and their flags |
 | `tasks [-v]` | queued, suspended and interrupted tasks: id, due time (UTC) and frame; `-v` shows the whole stack |
