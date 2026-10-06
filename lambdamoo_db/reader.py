@@ -59,6 +59,12 @@ stackheaderRe = compile_re(templates.stack_header)
 pcRe = compile_re(templates.pc)
 waifHeaderRe = compile_re(templates.waif_header)
 
+# Built-ins the server registers with register_function_with_read_write: each
+# saves one line of its own state after its name in a suspended activation.
+BI_FUNCS_WITH_DATA = frozenset({"create", "recreate", "recycle", "move"})
+# call_function saves the name of the function it called, then that function's state.
+CALL_FUNCTION_DATA_PREFIX = "bf_call_function data: fname = "
+
 
 class Reader:
 
@@ -615,7 +621,19 @@ class Reader:
         activation.error = int(pcMatch.group("error"))
         if activation.bi_func:
             activation.bi_func_name = self.readString()
+            activation.bi_func_data = self.read_bi_func_data(activation.bi_func_name)
         return activation
+
+    def read_bi_func_data(self, name: str) -> list[str]:
+        """Read the state a built-in saved after its name (ToastStunt write_bi_func_data)."""
+        if name == "call_function":
+            line = self.readString()
+            if not line.startswith(CALL_FUNCTION_DATA_PREFIX):
+                self.parse_error(f"Bad call_function data {line}")
+            return [line, *self.read_bi_func_data(line[len(CALL_FUNCTION_DATA_PREFIX):])]
+        if name in BI_FUNCS_WITH_DATA:
+            return [self.readString()]
+        return []
 
     def readRTEnv(self, db: MooDatabase) -> dict[str, Any]:
         varCountMatch = self._read_and_match(varCountRe, "Could not find variable count for RT Env")

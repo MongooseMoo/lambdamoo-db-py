@@ -148,6 +148,7 @@ class Activation:
     bi_func: int = attrs.field(init=False, default=0)  # Built-in function flag
     error: int = attrs.field(init=False, default=0)  # Error value
     bi_func_name: str | None = attrs.field(init=False, default=None)  # Built-in function name
+    bi_func_data: list[str] = attrs.field(init=False, factory=list)  # State lines the built-in saved after its name
     language_version: int | None = attrs.field(init=False, default=None)
     argstr: str = attrs.field(init=False, default="No")
     dobjstr: str = attrs.field(init=False, default="More")
