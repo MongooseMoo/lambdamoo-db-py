@@ -1,6 +1,6 @@
 import re
 from io import TextIOWrapper
-from logging import getLogger
+from logging import DEBUG, getLogger
 from typing import Any, NoReturn, Pattern, Union
 
 import parse
@@ -16,15 +16,8 @@ logger = getLogger(__name__)
 
 def load(filename: str) -> MooDatabase:
     """Load a database from a file"""
-    # Detect line endings by reading first few bytes
     with open(filename, "rb") as f:
-        chunk = f.read(1000)
-        if b'\r\n' in chunk:
-            line_ending = '\r\n'
-        elif b'\n' in chunk:
-            line_ending = '\n'
-        else:
-            line_ending = '\n'  # Default
+        line_ending = detect_line_ending(f.read(1000))
 
     # Open in text mode for parsing
     with open(filename, "r", encoding="latin-1") as f:
@@ -32,6 +25,11 @@ def load(filename: str) -> MooDatabase:
         db = r.parse()
         db.line_ending = line_ending
         return db
+
+
+def detect_line_ending(chunk: bytes) -> str:
+    """The line ending used by a dump, judged from its first bytes."""
+    return '\r\n' if b'\r\n' in chunk else '\n'
 
 
 def compile_re(template: str) -> Pattern[str]:
@@ -68,17 +66,16 @@ class Reader:
         self.filename = filename
         self.file = fio
         self.line = 0
+        # A 100 MB dump has millions of values; formatting a debug message for
+        # each one costs more than parsing it, so it is done only when wanted.
+        self.debug = logger.isEnabledFor(DEBUG)
 
     def parse_error(self, message: str) -> NoReturn:
         raise Exception(f"Parse Error: {self.filename}:{self.line} : {message}")
 
     def parse(self) -> "MooDatabase":
         db = MooDatabase()
-        db.versionstring = self.readString()
-        version = versionRe.match(db.versionstring)
-        if not version:
-            self.parse_error("Invalid version string")
-        db.version = int(version.group("version"))
+        self.read_version(db)
         if DBVersions.DBV_Exceptions <= db.version < DBVersions.DBV_NextGen:
             self.parse_v4(db)
         elif db.version == DBVersions.DBV_Bool:
@@ -86,6 +83,13 @@ class Reader:
         else:
             self.parse_error(f"Unknown db version {db.version}")
         return db
+
+    def read_version(self, db: MooDatabase) -> None:
+        db.versionstring = self.readString()
+        version = versionRe.match(db.versionstring)
+        if not version:
+            self.parse_error("Invalid version string")
+        db.version = int(version.group("version"))
 
     def parse_v4(self, db: MooDatabase) -> None:
         logger.debug("Parsing pre-next-generation database")
@@ -102,6 +106,15 @@ class Reader:
 
     def parse_v17(self, db: MooDatabase) -> None:
         logger.debug("Parsing v17 database")
+        self.read_v17_header(db)
+        self.readObjects(db)
+        if db.version >= DBVersions.DBV_Anon:
+            self.readAnonObjects(db)
+        db.total_verbs = self.readInt()
+        self.readVerbs(db)
+
+    def read_v17_header(self, db: MooDatabase) -> None:
+        """Everything between the version line and the first object record."""
         self.readPlayers(db)
         self.readPending(db)
         self.readClocks(db)
@@ -110,11 +123,6 @@ class Reader:
         self.readInterruptedTasks(db)
         self.readConnections(db)
         db.total_objects = self.readInt()
-        self.readObjects(db)
-        if db.version >= DBVersions.DBV_Anon:
-            self.readAnonObjects(db)
-        db.total_verbs = self.readInt()
-        self.readVerbs(db)
 
     def readValue(self, db: MooDatabase, *, known_type: int | None = None) -> Any:
         line_at_start = self.line
@@ -126,60 +134,48 @@ class Reader:
         match val_type:
             case MooTypes.STR:
                 result = self.readString()
-                logger.debug(f"  [TYPE_STR @ line {line_at_start}] = {result!r}")
-                return result
             case MooTypes.OBJ:
                 result = self.readObjnum()
-                logger.debug(f"  [TYPE_OBJ @ line {line_at_start}] = #{result}")
-                return result
             case MooTypes.ANON:
                 result = self.readAnon(db)
-                logger.debug(f"  [TYPE_ANON @ line {line_at_start}] = {result}")
-                return result
             case MooTypes.INT:
                 result = self.readInt()
-                logger.debug(f"  [TYPE_INT @ line {line_at_start}] = {result}")
-                return result
             case MooTypes.FLOAT:
                 result = self.readFloat()
-                logger.debug(f"  [TYPE_FLOAT @ line {line_at_start}] = {result}")
-                return result
             case MooTypes.ERR:
                 result = self.readErr()
-                logger.debug(f"  [TYPE_ERR @ line {line_at_start}] = {result}")
-                return result
             case MooTypes.LIST:
                 result = self.readList(db)
-                logger.debug(f"  [TYPE_LIST @ line {line_at_start}] count={len(result)}")
-                return result
             case MooTypes.CLEAR:
-                logger.debug(f"  [TYPE_CLEAR @ line {line_at_start}]")
-                return CLEAR
+                result = CLEAR
             case MooTypes.NONE:
-                logger.debug(f"  [TYPE_NONE @ line {line_at_start}]")
-                return None
+                result = None
             case MooTypes.MAP:
                 result = self.readMap(db)
-                logger.debug(f"  [TYPE_MAP @ line {line_at_start}] count={len(result)}")
-                return result
             case MooTypes.BOOL:
                 result = self.readBool()
-                logger.debug(f"  [TYPE_BOOL @ line {line_at_start}] = {result}")
-                return result
             case MooTypes._CATCH:
                 result = MooCatch(self.readInt())
-                logger.debug(f"  [TYPE_CATCH @ line {line_at_start}] = {result}")
-                return result
             case MooTypes._FINALLY:
                 result = MooFinally(self.readInt())
-                logger.debug(f"  [TYPE_FINALLY @ line {line_at_start}] = {result}")
-                return result
             case MooTypes.WAIF:
                 result = self.readWaif(db)
-                logger.debug(f"  [TYPE_WAIF @ line {line_at_start}] = {result}")
-                return result
             case _:
                 self.parse_error(f"unknown type {val_type}")
+        if self.debug:
+            self.log_value(val_type, line_at_start, result)
+        return result
+
+    def log_value(self, val_type: int, line_at_start: int, result: Any) -> None:
+        name = MooTypes(val_type).name.lstrip("_")
+        if val_type in (MooTypes.CLEAR, MooTypes.NONE):
+            logger.debug(f"  [TYPE_{name} @ line {line_at_start}]")
+        elif val_type in (MooTypes.LIST, MooTypes.MAP):
+            logger.debug(f"  [TYPE_{name} @ line {line_at_start}] count={len(result)}")
+        elif val_type == MooTypes.STR:
+            logger.debug(f"  [TYPE_STR @ line {line_at_start}] = {result!r}")
+        else:
+            logger.debug(f"  [TYPE_{name} @ line {line_at_start}] = {result}")
 
     def readString(self) -> str:
         """Read a string from the database file"""
@@ -297,6 +293,14 @@ class Reader:
         return obj
 
     def readObject_ng(self, db: MooDatabase) -> Union[MooObject, None]:
+        obj = self.read_object_head_ng(db)
+        if obj is not None:
+            self.readProperties(db, obj)
+            logger.debug(f"Completed reading object #{obj.id} {obj.name!r}")
+        return obj
+
+    def read_object_head_ng(self, db: MooDatabase) -> Union[MooObject, None]:
+        """An object record up to its properties: the header fields and the verb definitions."""
         line_at_start = self.line
         objNumber = self.readString()
         if not objNumber.startswith("#"):
@@ -341,9 +345,6 @@ class Reader:
         logger.debug(f"  verbs count = {numVerbs}")
         for _ in range(numVerbs):
             self.readVerbMetadata(obj)
-
-        self.readProperties(db, obj)
-        logger.debug(f"Completed reading object #{oid} {obj.name!r}")
         return obj
 
     def readAnon(self, db: MooDatabase) -> Anon:
@@ -385,23 +386,27 @@ class Reader:
         logger.debug(f"Finished reading {db.total_verbs} verbs")
 
     def readVerb(self, db: MooDatabase) -> None:
+        objNumber, verbNumber, code = self.read_program()
+        obj = db.objects.get(objNumber)
+        if not obj:
+            self.parse_error(f"object {objNumber} not found")
+        self.attach_program(obj, verbNumber, code)
+
+    def read_program(self) -> tuple[int, int, list[str]]:
+        """One verb program: the object it is on, the verb's index there, and its code."""
         verbLocation = self.readString()
         if ":" not in verbLocation:
             self.parse_error("verb does not have seperator")
 
         sep = verbLocation.index(":")
-        objNumber = int(verbLocation[1:sep])
-        verbNumber = int(verbLocation[sep + 1:])
-        code = self.readCode()
-        obj = db.objects.get(objNumber)
-        if not obj:
-            self.parse_error(f"object {objNumber} not found")
+        return int(verbLocation[1:sep]), int(verbLocation[sep + 1:]), self.readCode()
 
+    def attach_program(self, obj: MooObject, verbNumber: int, code: list[str]) -> None:
         verb = obj.verbs[verbNumber]
         if not verb:
-            self.parse_error(f"verb ${verbNumber} not found on object ${objNumber}")
+            self.parse_error(f"verb ${verbNumber} not found on object ${obj.id}")
 
-        verb.object = objNumber
+        verb.object = obj.id
         verb.code = code
 
     def readCode(self) -> list[str]:
@@ -452,17 +457,12 @@ class Reader:
         # Slots are the object's own propdefs, then each ancestor's in db_ancestors() order
         # (db_properties.cc db_find_property), which covers multiple inheritance too.
         names = [p.propertyName for a in db.ancestors(obj) for p in a.properties[: a.propdefs_count]]
-        i = 1
-        for p in obj.properties:
-            try:
-                n = names.pop(0)
-            except IndexError:
-                n = i
+        for i, p in enumerate(obj.properties, 1):
+            n = names[i - 1] if i <= len(names) else i
             if not p.propertyName:
                 p.propertyName = n
             elif n != p.propertyName:
                 self.parse_error(f"property name mismatch: {n} != {p.propertyName}")
-            i += 1
 
     def readVerbMetadata(self, obj: MooObject) -> None:
         name = self.readString()
@@ -478,23 +478,25 @@ class Reader:
         propdefs_count = self.readInt()
         obj.propdefs_count = propdefs_count
         logger.debug(f"  propdefs_count = {propdefs_count}")
+        debug = self.debug
         propertyNames = []
         for i in range(propdefs_count):
             name = self.readString()
             propertyNames.append(name)
-            logger.debug(f"  propdef[{i}] name = {name!r}")
+            if debug:
+                logger.debug(f"  propdef[{i}] name = {name!r}")
         # nval = total property VALUES (defined + inherited)
         nval = self.readInt()
         logger.debug(f"  total properties (nval) = {nval}")
         for idx in range(nval):
-            propertyName = None
-            if propertyNames:
-                propertyName = propertyNames.pop(0)
-            logger.debug(f"  property[{idx}] name = {propertyName!r}")
+            propertyName = propertyNames[idx] if idx < propdefs_count else None
+            if debug:
+                logger.debug(f"  property[{idx}] name = {propertyName!r}")
             value = self.readValue(db)
             owner = self.readObjnum()
             perms = PropertyFlags(self.readInt())
-            logger.debug(f"    owner=#{owner}, perms={perms}")
+            if debug:
+                logger.debug(f"    owner=#{owner}, perms={perms}")
             property = Property(propertyName, value, owner, perms)
             obj.properties.append(property)
 

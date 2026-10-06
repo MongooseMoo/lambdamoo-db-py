@@ -9,16 +9,8 @@ through parents in ``db_ancestors()`` order.
 
 from __future__ import annotations
 
-import hashlib
-import logging
-import os
-import pickle
 import re
-import sys
-import tempfile
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 from typing import Any, Iterator
 
 import attrs
@@ -40,10 +32,8 @@ from .database import (
     WaifReference,
 )
 from .enums import ObjectFlags, PropertyFlags
-from .reader import load
+from .lazy import LazyDatabase
 from .references import find_property_references
-
-logger = logging.getLogger(__name__)
 
 ERROR_NAMES = [
     "E_NONE", "E_TYPE", "E_DIV", "E_PERM", "E_PROPNF", "E_VERBNF", "E_VARNF",
@@ -70,71 +60,6 @@ class LookupFailed(Exception):
 
 
 # --------------------------------------------------------------------------
-# Loading with a pickle cache (parsing a 100 MB dump takes ~30 s)
-
-# Modules whose code decides what a parsed dump looks like once pickled.
-_CACHE_KEY_MODULES = ("reader.py", "database.py", "enums.py", "templates.py")
-
-
-def _package_version() -> str:
-    try:
-        return version("lambdamoo-db")
-    except PackageNotFoundError:
-        return "dev"
-
-
-def default_cache_dir() -> Path:
-    base = os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
-    return (Path(base) if base else Path.home() / ".cache") / "lambdamoo-db"
-
-
-def _cache_prefix(db_path: Path) -> str:
-    return hashlib.sha256(str(db_path.resolve()).encode()).hexdigest()[:16]
-
-
-def cache_path_for(db_path: Path, cache_dir: Path) -> Path:
-    """``<path hash>-<content key hash>.pickle``; the key covers the dump and the parser."""
-    st = db_path.stat()
-    here = Path(__file__).parent
-    parts = [str(st.st_size), str(st.st_mtime_ns), _package_version(), f"{sys.version_info[0]}.{sys.version_info[1]}"]
-    parts += [hashlib.sha256((here / m).read_bytes()).hexdigest() for m in _CACHE_KEY_MODULES]
-    key = hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
-    return cache_dir / f"{_cache_prefix(db_path)}-{key}.pickle"
-
-
-def load_cached(db_path: str | Path, cache_dir: Path | None = None) -> MooDatabase:
-    """Load a textdump, reusing a pickle keyed on path, size, mtime and parser source.
-
-    Writing a new pickle for a dump removes the stale pickles of earlier
-    versions of the same dump path, so the cache holds one entry per dump.
-    An unreadable pickle is reparsed and replaced.
-    """
-    db_path = Path(db_path)
-    if cache_dir is None:
-        return load(str(db_path))
-    cached = cache_path_for(db_path, cache_dir)
-    if cached.exists():
-        try:
-            return pickle.loads(cached.read_bytes())
-        except Exception as e:  # a truncated or incompatible pickle is only a cache miss
-            logger.warning("ignoring unreadable cache %s: %s", cached, e)
-    db = load(str(db_path))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=cached.stem, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            pickle.dump(db, f, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(tmp, cached)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    for stale in cache_dir.glob(f"{_cache_prefix(db_path)}-*.pickle"):
-        if stale != cached:
-            stale.unlink(missing_ok=True)
-    return db
-
-
-# --------------------------------------------------------------------------
 # Object references
 
 
@@ -150,16 +75,30 @@ def split_ref(spec: str) -> tuple[str, str]:
 
 
 def resolve_object(db: MooDatabase, ref: str) -> MooObject:
-    if ref.startswith("$"):
-        value = property_value(db, db.objects[0], ref[1:])
+    """Resolve an object reference, optionally traversing object-valued properties."""
+    root, *path = ref.split(".")
+    if not _REF_RE.fullmatch(root) or any(
+        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) for part in path
+    ):
+        raise LookupFailed(f"not an object reference: {ref!r} (use #N, N or $name, optionally .property)")
+    if root.startswith("$"):
+        value = property_value(db, db.objects[0], root[1:])
         if not isinstance(value, ObjNum):
-            raise LookupFailed(f"#0.{ref[1:]} is {format_value(value)}, not an object")
+            raise LookupFailed(f"#0.{root[1:]} is {format_value(value)}, not an object")
         num = int(value)
     else:
-        num = int(ref.lstrip("#"))
+        num = int(root.lstrip("#"))
     obj = db.objects.get(num)
     if obj is None:
         raise LookupFailed(f"#{num} does not exist (recycled or out of range)")
+    for part in path:
+        value = property_value(db, obj, part)
+        if not isinstance(value, ObjNum):
+            raise LookupFailed(f"#{obj.id}.{part} is {format_value(value)}, not an object")
+        num = int(value)
+        obj = db.objects.get(num)
+        if obj is None:
+            raise LookupFailed(f"#{num} does not exist (recycled or out of range)")
     return obj
 
 
@@ -200,12 +139,12 @@ def property_perms(prop: Property) -> str:
 def label(db: MooDatabase, num: int, names: dict[int, str] | None = None) -> str:
     """``#20 $string_utils "string utilities"``; the name is omitted for missing objects."""
     num = int(num)
-    obj = db.objects.get(num)
+    name = db.name_of(num)
     text = f"#{num}"
     if names and num in names:
         text += f" {names[num]}"
-    if obj is not None:
-        text += f" {moo_string(obj.name)}"
+    if name is not None:
+        text += f" {moo_string(name)}"
     return text
 
 
@@ -299,7 +238,7 @@ def verb_summary(verb: Verb) -> str:
 
 
 def all_objects(db: MooDatabase) -> Iterator[MooObject]:
-    return (db.objects[k] for k in sorted(db.objects))
+    return iter(sorted(db.objects.values(), key=lambda o: o.id))
 
 
 @attrs.frozen
@@ -313,7 +252,9 @@ class GrepHit:
 
 def grep_verbs(db: MooDatabase, pattern: re.Pattern[str], objs: list[MooObject] | None = None) -> Iterator[GrepHit]:
     """Yield a hit for every verb code line matching pattern."""
-    for o in objs if objs is not None else all_objects(db):
+    if objs is None:
+        objs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+    for o in objs:
         for idx, v in enumerate(o.verbs):
             for n, line in enumerate(v.code or [], 1):
                 if pattern.search(line):
