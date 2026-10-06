@@ -77,6 +77,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `children REF [-r]`, `contents REF [-r]` | direct or recursive children / contents |
 | `players` | player objects and their flags |
 | `tasks [-v]` | queued, suspended and interrupted tasks: id, due time (UTC) and frame; `-v` shows the whole stack |
+| `batch [QUERY...]` | the answers to several of the commands above, in one run |
 
 Every command exits 1 with a message when a reference does not resolve.
 
@@ -93,14 +94,40 @@ Lookups follow ToastStunt rather than a simplified model:
 - A `clear` property takes its value from the first parent that inherits the
   defining object, repeatedly, as `db_find_property()` does.
 
-### Cache
+### Several queries in one run
 
-Parsing a large dump is slow, so the parsed dump is pickled under
-`lambdamoo-db` in `$XDG_CACHE_HOME`, `%LOCALAPPDATA%` or `~/.cache`. Change
-it with `--cache-dir`, or bypass it with `--no-cache`. The key covers the
-dump's path, size and mtime, the Python version and the parser's source, so a
-new dump or a parser change is reparsed. Writing a new entry deletes the stale
-ones for the same path, so the cache holds one pickle per dump path.
+`batch` answers any mix of commands from one process, so objects read for one
+query are reused by the next. Give each query as one quoted argument, or one
+per line on standard input:
+
+```sh
+moodb batch 'obj $httpd' 'code $httpd:GET 852:12' 'prop $httpd.port'
+moodb batch < queries.txt
+```
+
+Each answer follows a `=== QUERY` line. The run stops at the first query that
+fails, with that query's error and exit status.
+
+### Speed and the index
+
+The first query on a v17 dump parses all of it once (about 25 s for a 94 MB
+dump) and saves an index: the byte offset of every object record and verb
+program, and every object's name. The index is about 1 MB. Later queries read
+only the records they need from the dump itself:
+
+- `obj`, `props`, `verbs`, `code`, `prop`, `children`, `contents`, `players`,
+  `tasks` and `find TEXT` read a few records, or none.
+- `grep` reads the verb definitions and code, not the properties.
+- `info`, `find --verb`, `find --prop`, `refs` and `values` look at every
+  object, so they parse the whole dump each time.
+
+The index lives under `lambdamoo-db` in `$XDG_CACHE_HOME`, `%LOCALAPPDATA%` or
+`~/.cache`. Change that with `--cache-dir`. `--no-cache` parses the whole dump
+and neither reads nor writes an index. The key covers the dump's path, size
+and mtime, the Python version and the parser's source, so a new dump or a
+parser change gets a new index. Writing one deletes the stale ones for the
+same path, and the parsed-dump pickle that earlier versions kept there. Dumps
+older than format 17 have no index and are parsed whole.
 
 ## Find object references in properties
 

@@ -233,6 +233,15 @@ class MooDatabase:
             for verb in obj.verbs:
                 yield verb
 
+    def object_names(self) -> dict[int, str]:
+        """The name of every object, by object number."""
+        return {oid: obj.name for oid, obj in self.objects.items()}
+
+    def name_of(self, oid: int) -> str | None:
+        """An object's name, or None if there is no such object."""
+        obj = self.objects.get(oid)
+        return None if obj is None else obj.name
+
     def ancestors(self, obj: MooObject) -> list[MooObject]:
         """obj, then its ancestors in ToastStunt db_ancestors() order.
 

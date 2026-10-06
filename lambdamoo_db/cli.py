@@ -1,17 +1,17 @@
 import os
 import re
+import shlex
+import sys
 from itertools import groupby
 from pathlib import Path
 
 import click
-from .exporter import to_moo_files
 from .inspection import (
     BUILTIN_PROPS,
     LookupFailed,
     all_objects,
     all_properties,
     builtin_value,
-    default_cache_dir,
     descendants,
     dollar_names,
     find_references,
@@ -23,7 +23,6 @@ from .inspection import (
     frame_text,
     grep_verbs,
     label,
-    load_cached,
     lookup_property,
     moo_string,
     object_flags,
@@ -35,6 +34,7 @@ from .inspection import (
     verb_summary,
     verbcasecmp,
 )
+from .lazy import default_cache_dir, open_indexed
 from .reader import load
 from .split import DEFAULT_MAX_PIECE_BYTES, SplitError, first_difference, join_dir, write_split
 
@@ -43,6 +43,8 @@ from .split import DEFAULT_MAX_PIECE_BYTES, SplitError, first_difference, join_d
 @click.argument("dbfile")
 @click.argument("dir")
 def moodb2flat(dbfile: str, dir: str) -> None:
+    from .exporter import to_moo_files  # imported here: only this command needs cattrs
+
     db = load(dbfile)
     to_moo_files(db, dir, True)
 
@@ -93,9 +95,9 @@ def moodb_join(indir: str, outfile: str | None, compare: str | None) -> None:
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--db", "db_path", envvar="MOODB", type=click.Path(exists=True, dir_okay=False),
               help="Textdump to read (or set MOODB).")
-@click.option("--no-cache", is_flag=True, help="Parse the dump without reading or writing the pickle cache.")
+@click.option("--no-cache", is_flag=True, help="Parse the whole dump, without reading or writing its offset index.")
 @click.option("--cache-dir", type=click.Path(file_okay=False), default=None,
-              help="Pickle cache directory (default: lambdamoo-db under $XDG_CACHE_HOME, %LOCALAPPDATA% or ~/.cache).")
+              help="Index directory (default: lambdamoo-db under $XDG_CACHE_HOME, %LOCALAPPDATA% or ~/.cache).")
 @click.pass_context
 def moodb(ctx: click.Context, db_path: str | None, no_cache: bool, cache_dir: str | None) -> None:
     """Read-only inspection of a LambdaMOO/ToastStunt textdump.
@@ -105,7 +107,9 @@ def moodb(ctx: click.Context, db_path: str | None, no_cache: bool, cache_dir: st
     Verbs:             REF:NAME (MOO name matching, inherited) or REF:N (0-based index on REF).
     Properties:        REF.NAME (inherited, clear values followed).
 
-    The parsed dump is cached as a pickle, so only the first query on a new dump is slow.
+    The first query on a new dump parses all of it and saves an index of where
+    each record is. Later queries read only the records they need. `batch`
+    answers several queries in one run.
     """
     cache = None if no_cache else Path(cache_dir) if cache_dir else default_cache_dir()
     ctx.obj = {"path": db_path, "cache": cache}
@@ -115,9 +119,32 @@ def _db(ctx: click.Context):
     if "db" not in ctx.obj:
         if ctx.obj["path"] is None:
             raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
-        ctx.obj["db"] = load_cached(ctx.obj["path"], ctx.obj["cache"])
+        path, cache = ctx.obj["path"], ctx.obj["cache"]
+        ctx.obj["db"] = load(path) if cache is None else open_indexed(path, cache)
         ctx.obj["names"] = dollar_names(ctx.obj["db"])
     return ctx.obj["db"], ctx.obj["names"]
+
+
+@moodb.command()
+@click.argument("query", nargs=-1)
+@click.pass_context
+def batch(ctx: click.Context, query: tuple[str, ...]) -> None:
+    """Answer several queries in one run: `batch 'obj 842' 'code 842:0 842:1' 'prop 842.todos'`.
+
+    Each QUERY is one moodb command with its arguments, quoted as in a POSIX
+    shell. With no QUERY, queries are read from standard input, one per line.
+    Each answer follows a `=== QUERY` line. The run stops at the first query
+    that fails.
+    """
+    queries = query or tuple(line.strip() for line in sys.stdin if line.strip())
+    for q in queries:
+        name, *arguments = shlex.split(q)
+        command = moodb.get_command(ctx, name)
+        if command is None:
+            raise click.UsageError(f"no such command {name!r} in {q!r}")
+        click.echo(f"=== {q}")
+        with command.make_context(name, arguments, parent=ctx) as sub:
+            command.invoke(sub)
 
 
 def _object(db, ref: str):
@@ -350,9 +377,9 @@ def find(ctx: click.Context, text: str, mode: str | None) -> None:
                     click.echo(f"{label(db, o.id, names)}.{p.propertyName}")
         return
     needle = text.lower().lstrip("$")
-    for o in all_objects(db):
-        if needle in o.name.lower() or needle in names.get(o.id, "").lower():
-            click.echo(label(db, o.id, names))
+    for num, name in sorted(db.object_names().items()):
+        if needle in name.lower() or needle in names.get(num, "").lower():
+            click.echo(label(db, num, names))
 
 
 @moodb.command()

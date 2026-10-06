@@ -1,5 +1,3 @@
-import os
-import pickle
 from io import StringIO
 from pathlib import Path
 
@@ -11,11 +9,9 @@ from lambdamoo_db.database import CLEAR, MooDatabase, MooError, MooObject, ObjNu
 from lambdamoo_db.inspection import (
     LookupFailed,
     all_properties,
-    cache_path_for,
     find_slot,
     find_verb,
     format_value,
-    load_cached,
     lookup_property,
     property_value,
     resolve_object,
@@ -98,7 +94,7 @@ def test_cli_nested_object_references(db, monkeypatch):
     """Namespace chains work for object, program and final-property reads."""
     import lambdamoo_db.cli as cli
 
-    monkeypatch.setattr(cli, "load_cached", lambda *_: db)
+    monkeypatch.setattr(cli, "open_indexed", lambda *_: db)
     runner = CliRunner()
     # #0.string_utils -> #20; builtin owner -> #2. No new fixture props.
     for args, expected in [
@@ -142,7 +138,7 @@ def test_cli_nested_properties_preserve_literal_dotted_names(monkeypatch):
         synthetic.objects[num] = obj
     for obj in synthetic.objects.values():
         Reader(StringIO()).process_propnames(synthetic, obj)
-    monkeypatch.setattr(cli, "load_cached", lambda *_: synthetic)
+    monkeypatch.setattr(cli, "open_indexed", lambda *_: synthetic)
     runner = CliRunner()
     for ref, expected in [
         ("$namespace.FIELD.WITH.DOT", '"literal"'),
@@ -257,32 +253,6 @@ def test_clear_follows_the_parent_that_inherits_the_definer():
     hit = lookup_property(db, child, "a1")  # #4 clear -> #3 clear -> #1
     assert (hit.value, hit.definer.id, hit.value_from.id) == ("A-value", 1, 1)
     assert [(h.name, h.value) for h in all_properties(db, child)] == [("c1", "C-value"), ("a1", "A-value"), ("b1", "C-b1")]
-
-
-def test_load_cached_writes_reuses_and_prunes(tmp_path):
-    dump = tmp_path / "world.db"
-    dump.write_bytes(TOASTCORE.read_bytes())
-    cache = tmp_path / "cache"
-    first = load_cached(dump, cache)
-    assert len(list(cache.glob("*.pickle"))) == 1
-    second = load_cached(dump, cache)
-    assert second.objects[20].name == first.objects[20].name
-
-    # A new version of the same dump replaces the old pickle instead of piling up.
-    stat = dump.stat()
-    os.utime(dump, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
-    load_cached(dump, cache)
-    assert list(cache.glob("*.pickle")) == [cache_path_for(dump, cache)]
-    assert not list(cache.glob("*.tmp"))
-
-
-def test_load_cached_reparses_an_unreadable_pickle(tmp_path):
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    cache_path_for(TOASTCORE, cache).write_bytes(b"not a pickle")
-    db = load_cached(TOASTCORE, cache)
-    assert db.objects[20].name == "string utilities"
-    assert pickle.loads(cache_path_for(TOASTCORE, cache).read_bytes()).objects[20].name == "string utilities"
 
 
 def run(*args):

@@ -16,15 +16,8 @@ logger = getLogger(__name__)
 
 def load(filename: str) -> MooDatabase:
     """Load a database from a file"""
-    # Detect line endings by reading first few bytes
     with open(filename, "rb") as f:
-        chunk = f.read(1000)
-        if b'\r\n' in chunk:
-            line_ending = '\r\n'
-        elif b'\n' in chunk:
-            line_ending = '\n'
-        else:
-            line_ending = '\n'  # Default
+        line_ending = detect_line_ending(f.read(1000))
 
     # Open in text mode for parsing
     with open(filename, "r", encoding="latin-1") as f:
@@ -32,6 +25,11 @@ def load(filename: str) -> MooDatabase:
         db = r.parse()
         db.line_ending = line_ending
         return db
+
+
+def detect_line_ending(chunk: bytes) -> str:
+    """The line ending used by a dump, judged from its first bytes."""
+    return '\r\n' if b'\r\n' in chunk else '\n'
 
 
 def compile_re(template: str) -> Pattern[str]:
@@ -77,11 +75,7 @@ class Reader:
 
     def parse(self) -> "MooDatabase":
         db = MooDatabase()
-        db.versionstring = self.readString()
-        version = versionRe.match(db.versionstring)
-        if not version:
-            self.parse_error("Invalid version string")
-        db.version = int(version.group("version"))
+        self.read_version(db)
         if DBVersions.DBV_Exceptions <= db.version < DBVersions.DBV_NextGen:
             self.parse_v4(db)
         elif db.version == DBVersions.DBV_Bool:
@@ -89,6 +83,13 @@ class Reader:
         else:
             self.parse_error(f"Unknown db version {db.version}")
         return db
+
+    def read_version(self, db: MooDatabase) -> None:
+        db.versionstring = self.readString()
+        version = versionRe.match(db.versionstring)
+        if not version:
+            self.parse_error("Invalid version string")
+        db.version = int(version.group("version"))
 
     def parse_v4(self, db: MooDatabase) -> None:
         logger.debug("Parsing pre-next-generation database")
@@ -105,6 +106,15 @@ class Reader:
 
     def parse_v17(self, db: MooDatabase) -> None:
         logger.debug("Parsing v17 database")
+        self.read_v17_header(db)
+        self.readObjects(db)
+        if db.version >= DBVersions.DBV_Anon:
+            self.readAnonObjects(db)
+        db.total_verbs = self.readInt()
+        self.readVerbs(db)
+
+    def read_v17_header(self, db: MooDatabase) -> None:
+        """Everything between the version line and the first object record."""
         self.readPlayers(db)
         self.readPending(db)
         self.readClocks(db)
@@ -113,11 +123,6 @@ class Reader:
         self.readInterruptedTasks(db)
         self.readConnections(db)
         db.total_objects = self.readInt()
-        self.readObjects(db)
-        if db.version >= DBVersions.DBV_Anon:
-            self.readAnonObjects(db)
-        db.total_verbs = self.readInt()
-        self.readVerbs(db)
 
     def readValue(self, db: MooDatabase, *, known_type: int | None = None) -> Any:
         line_at_start = self.line
@@ -288,6 +293,14 @@ class Reader:
         return obj
 
     def readObject_ng(self, db: MooDatabase) -> Union[MooObject, None]:
+        obj = self.read_object_head_ng(db)
+        if obj is not None:
+            self.readProperties(db, obj)
+            logger.debug(f"Completed reading object #{obj.id} {obj.name!r}")
+        return obj
+
+    def read_object_head_ng(self, db: MooDatabase) -> Union[MooObject, None]:
+        """An object record up to its properties: the header fields and the verb definitions."""
         line_at_start = self.line
         objNumber = self.readString()
         if not objNumber.startswith("#"):
@@ -332,9 +345,6 @@ class Reader:
         logger.debug(f"  verbs count = {numVerbs}")
         for _ in range(numVerbs):
             self.readVerbMetadata(obj)
-
-        self.readProperties(db, obj)
-        logger.debug(f"Completed reading object #{oid} {obj.name!r}")
         return obj
 
     def readAnon(self, db: MooDatabase) -> Anon:
@@ -376,23 +386,27 @@ class Reader:
         logger.debug(f"Finished reading {db.total_verbs} verbs")
 
     def readVerb(self, db: MooDatabase) -> None:
+        objNumber, verbNumber, code = self.read_program()
+        obj = db.objects.get(objNumber)
+        if not obj:
+            self.parse_error(f"object {objNumber} not found")
+        self.attach_program(obj, verbNumber, code)
+
+    def read_program(self) -> tuple[int, int, list[str]]:
+        """One verb program: the object it is on, the verb's index there, and its code."""
         verbLocation = self.readString()
         if ":" not in verbLocation:
             self.parse_error("verb does not have seperator")
 
         sep = verbLocation.index(":")
-        objNumber = int(verbLocation[1:sep])
-        verbNumber = int(verbLocation[sep + 1:])
-        code = self.readCode()
-        obj = db.objects.get(objNumber)
-        if not obj:
-            self.parse_error(f"object {objNumber} not found")
+        return int(verbLocation[1:sep]), int(verbLocation[sep + 1:]), self.readCode()
 
+    def attach_program(self, obj: MooObject, verbNumber: int, code: list[str]) -> None:
         verb = obj.verbs[verbNumber]
         if not verb:
-            self.parse_error(f"verb ${verbNumber} not found on object ${objNumber}")
+            self.parse_error(f"verb ${verbNumber} not found on object ${obj.id}")
 
-        verb.object = objNumber
+        verb.object = obj.id
         verb.code = code
 
     def readCode(self) -> list[str]:
