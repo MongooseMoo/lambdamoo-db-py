@@ -24,6 +24,21 @@ moodb = "lambdamoo_db.cli:moodb"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/lambdamoo_db",
+    "/tests",
+    "/specs/full-diff.md",
+    "/README.md",
+    "/pyproject.toml",
+    "/db_test.py",
+    "/LambdaCore-latest.db",
+    "/toast2.db",
+    "/toastcore.db",
+    "/test_output",
+    "/poetry.lock",
+]
+
 [tool.black]
 line-length = 160
 
