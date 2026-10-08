@@ -69,6 +69,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `code SPEC... [-n]` | verb source as `@program` blocks; a bare REF prints all of its verbs; `-n` numbers lines |
 | `prop SPEC... [--full]` | effective property values as MOO literals, naming the definer when inherited |
 | `grep PATTERN [-o REF] [-i] [-F] [-l] [-C N]` | Python regex over all verb code; `-o` limits to objects, `-l` lists verbs once, `-C` adds context |
+| `added OLD [PATTERN] [-i] [-F] [-l]` | added or replaced verb code lines relative to OLD; optional Python regex, `-F` for literal text, `-l` for counts per verb |
 | `find TEXT` | objects whose name or `$name` contains TEXT |
 | `find --verb NAME` | objects defining a verb that a call to NAME would match |
 | `find --prop NAME` | objects defining a property called NAME |
@@ -80,6 +81,29 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `batch [QUERY...]` | the answers to several of the commands above, in one run |
 
 Every command exits 1 with a message when a reference does not resolve.
+
+### Comparing verb source
+
+```sh
+moodb --db new.db added old.db
+moodb --db new.db added old.db 'notify\('
+moodb --db new.db added -l -F old.db 'E_INVARG'
+```
+
+`added` pairs verbs by object number, exact names and argument specification,
+then by occurrence among duplicate definitions. Inserting another verb before
+an existing one does not change that pairing. Renaming a verb or changing its
+argument specification makes it a new definition; extra duplicates are marked
+`new verb` too. Object numbers must describe the same world in both dumps.
+
+Within each pair, a line diff ignores leading and trailing whitespace for
+alignment and prints insertions and replacements with their original text and
+line numbers in the new dump. Regex filters search that original text. Moved
+lines can appear as additions. Deleted lines, removed verbs and metadata
+changes are not reported. Filters and the
+summary count only matching added lines; identical dumps print
+`0 added lines in 0 verbs`. Both dumps use the offset index when available,
+or a full parse with `--no-cache`.
 
 ### Lookup rules
 

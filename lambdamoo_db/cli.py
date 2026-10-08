@@ -9,6 +9,7 @@ import click
 from .inspection import (
     BUILTIN_PROPS,
     LookupFailed,
+    added_verb_lines,
     all_objects,
     all_properties,
     builtin_value,
@@ -136,7 +137,7 @@ def batch(ctx: click.Context, query: tuple[str, ...]) -> None:
     Each answer follows a `=== QUERY` line. The run stops at the first query
     that fails.
     """
-    queries = query or tuple(line.strip() for line in sys.stdin if line.strip())
+    queries = query or tuple(line.strip() for line in iter(sys.stdin.readline, "") if line.strip())
     for q in queries:
         name, *arguments = shlex.split(q)
         command = moodb.get_command(ctx, name)
@@ -351,6 +352,43 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
                 click.echo("--")
             sep = ":" if n in matched else "-"
             click.echo(f"#{o.id}:[{idx}] {_alias(v)}{sep}{n}{sep} {code_lines[n - 1].strip()}")
+
+
+@moodb.command()
+@click.argument("old", type=click.Path(exists=True, dir_okay=False))
+@click.argument("pattern", required=False)
+@click.option("-i", "--ignore-case", is_flag=True)
+@click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
+@click.option("-l", "--verbs-only", is_flag=True, help="Print each verb once, with its count of added lines.")
+@click.pass_context
+def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, fixed_strings: bool, verbs_only: bool) -> None:
+    """Verb code lines this dump has that the OLD dump's same verb does not: #OBJ:[index] name:LINE: text.
+
+    With PATTERN (Python regex), only added lines matching it. A verb that
+    OLD does not have is marked "new verb".
+    """
+    rx = None
+    if pattern is not None:
+        try:
+            rx = re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if ignore_case else 0)
+        except re.error as e:
+            raise click.BadParameter(str(e), param_hint="PATTERN")
+    db, names = _db(ctx)
+    cache = ctx.obj["cache"]
+    old_db = load(old) if cache is None else open_indexed(old, cache)
+    lines = verbs = 0
+    for _, group in groupby(added_verb_lines(old_db, db, rx), key=lambda h: (h.obj.id, h.index)):
+        hits = list(group)
+        o, idx, v = hits[0].obj, hits[0].index, hits[0].verb
+        lines += len(hits)
+        verbs += 1
+        new = "  (new verb)" if hits[0].is_new else ""
+        if verbs_only:
+            click.echo(f"{len(hits):4d}  {label(db, o.id, names)}:[{idx}] {moo_string(v.name)}{new}")
+            continue
+        for h in hits:
+            click.echo(f"#{o.id}:[{idx}] {_alias(v)}:{h.lineno}: {h.line}{new}")
+    click.echo(f"{lines} added lines in {verbs} verbs")
 
 
 @moodb.command()

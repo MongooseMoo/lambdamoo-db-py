@@ -170,3 +170,47 @@ def test_cli_batch_stops_at_the_first_failing_query(tmp_path):
     assert r.exit_code == 1
     assert "#2.wizard = 1" in r.output and "does not exist" in r.output
     assert "#2.name" not in r.output.split("does not exist")[1]
+
+
+def test_cli_batch_accepts_empty_stdin_and_blank_lines():
+    for text in ("", "\n \n\t\n"):
+        r = CliRunner().invoke(moodb, ["batch"], input=text)
+        assert r.exit_code == 0, r.output
+        assert r.output == ""
+
+
+def test_added_reads_real_dumps_with_and_without_the_index(tmp_path):
+    old_path = tmp_path / "old.db"
+    new_path = tmp_path / "new.db"
+    old_path.write_bytes(TOASTCORE.read_bytes())
+    full = load(str(old_path))
+    obj = next(o for o in full.objects.values() if any(v.code for v in o.verbs))
+    index, verb = next((i, v) for i, v in enumerate(obj.verbs) if v.code)
+    verb.code.append('  notify("added regression");')
+    with new_path.open("w", encoding="latin-1", newline="") as output:
+        dump(full, output)
+    args = ["--db", str(new_path)]
+    query = ["added", str(old_path), "added regression"]
+    plain = CliRunner().invoke(moodb, [*args, "--no-cache", *query])
+    assert plain.exit_code == 0, plain.output
+    assert f"#{obj.id}:[{index}]" in plain.output
+    assert '  notify("added regression");' in plain.output
+    assert plain.output.endswith("1 added lines in 1 verbs\n")
+    indented = CliRunner().invoke(moodb, [*args, "--no-cache", "added", str(old_path), r"^  notify\("])
+    assert indented.exit_code == 0, indented.output
+    assert indented.output == plain.output
+    for _ in range(2):
+        indexed = CliRunner().invoke(moodb, [*args, "--cache-dir", str(tmp_path / "cache"), *query])
+        assert indexed.exit_code == 0, indexed.output
+        assert indexed.output == plain.output
+
+    from lambdamoo_db.inspection import added_verb_lines
+
+    old = open_indexed(old_path, tmp_path / "cache")
+    new = open_indexed(new_path, tmp_path / "cache")
+    assert len(list(added_verb_lines(old, new))) == 1
+    assert not old.objects.loaded and not new.objects.loaded
+
+    identical = CliRunner().invoke(moodb, [*args, "--cache-dir", str(tmp_path / "cache"), "added", str(new_path)])
+    assert identical.exit_code == 0, identical.output
+    assert identical.output == "0 added lines in 0 verbs\n"
