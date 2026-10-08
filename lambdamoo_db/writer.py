@@ -542,6 +542,8 @@ class Writer:
         # Write built-in function name if present
         if activation.bi_func and activation.bi_func_name:
             self.writeString(activation.bi_func_name)
+            for line in activation.bi_func_data:
+                self.writeString(line)
 
     def writeSuspendedTasks(self):
         self.writeCollection(self.db.suspendedTasks, templates.suspended_task_count, self.writeSuspendedTask)
