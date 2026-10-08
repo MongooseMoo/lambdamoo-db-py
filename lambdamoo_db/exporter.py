@@ -18,6 +18,7 @@ _json_converter.register_unstructure_hook_factory(
 )
 for _scalar_type in (ObjNum, Anon, MooError, MooCatch, MooFinally):
     _json_converter.register_unstructure_hook(_scalar_type, int)
+_json_converter.register_unstructure_hook(Clear, lambda value: None)
 
 
 ILLEGAL_NAMES = [

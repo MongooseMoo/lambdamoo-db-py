@@ -202,6 +202,6 @@ existing export format, including its limitations: distinct typed map keys
 can collapse to the same integer, and JSON object keys become strings.
 Use the MOO reader/writer for typed round trips. Unsupported values raise
 `TypeError` instead of silently becoming null; the MOO `CLEAR` sentinel
-retains its existing null representation.
+retains its existing null representation, including in `to_json_data` results.
 Reader-populated fields declared `init=False` (including properties, verbs,
 and task state) are included. Sets such as recycled object IDs export as arrays.
