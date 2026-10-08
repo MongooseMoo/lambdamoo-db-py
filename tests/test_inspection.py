@@ -1,3 +1,4 @@
+import re
 from io import StringIO
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from lambdamoo_db.cli import moodb
 from lambdamoo_db.database import CLEAR, MooDatabase, MooError, MooObject, ObjNum, Property, Verb
 from lambdamoo_db.inspection import (
     LookupFailed,
+    added_verb_lines,
     all_properties,
     find_slot,
     find_verb,
@@ -257,6 +259,96 @@ def test_clear_follows_the_parent_that_inherits_the_definer():
 
 def run(*args):
     return CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "--no-cache", *args])
+
+
+def _verb_db(verbs_by_obj) -> MooDatabase:
+    db = MooDatabase()
+    for num, verbs in verbs_by_obj.items():
+        o = MooObject(num, f"obj{num}", 0, 0, -1, [])
+        for name, code in verbs:
+            v = Verb(name, ObjNum(2), 173, -1, 1)
+            v.code = code
+            o.verbs.append(v)
+        db.objects[num] = o
+    return db
+
+
+def test_added_verb_lines_reports_only_what_the_old_verb_lacks():
+    old = _verb_db({
+        1: [("move", ["a = 1;", "`b() ! ANY';", "return a;"]), ("keep", ["try", "x();", "except (ANY)", "endtry"])],
+    })
+    new = _verb_db({
+        # "helper" is inserted first, so "move" and "keep" change index and must still pair by name.
+        1: [
+            ("helper", ["try", "y();", "except e (ANY)", "endtry"]),
+            ("move", ["a = 1;", "`b() ! ANY';", "  `c() ! E_INVARG => 0';", "`b() ! ANY';", "return a;"]),
+            ("keep", ["x();", "try", "except (ANY)", "endtry"]),
+        ],
+        2: [("fresh", ["return `d() ! ANY';"])],
+    })
+    hits = [(h.obj.id, h.verb.name, h.lineno, h.line) for h in added_verb_lines(old, new)]
+    assert (1, "move", 3, "  `c() ! E_INVARG => 0';") in hits
+    # A second copy of a line the old verb had once is an addition.
+    assert [h for h in hits if h[1] == "move"] == [(1, "move", 3, "  `c() ! E_INVARG => 0';"), (1, "move", 4, "`b() ! ANY';")]
+    # Every line of a verb or object the old dump lacks is reported.
+    assert len([h for h in hits if h[1] == "helper"]) == 4
+    assert (2, "fresh", 1, "return `d() ! ANY';") in hits
+    # "keep" only moved x(); above try: one line reads as added, the try/except lines do not.
+    assert [h[3] for h in hits if h[1] == "keep"] == ["x();"]
+
+    catches = re.compile(r"^(try|except\b.*|finally)$|`[^']*!")
+    caught = [(h.obj.id, h.verb.name, h.lineno) for h in added_verb_lines(old, new, catches)]
+    assert caught == [(1, "helper", 1), (1, "helper", 3), (1, "move", 3), (1, "move", 4), (2, "fresh", 1)]
+
+
+def test_cli_added(monkeypatch, tmp_path):
+    import lambdamoo_db.cli as cli
+
+    old = _verb_db({0: [], 1: [("move", ["a = 1;"])]})
+    new = _verb_db({0: [], 1: [("move", ["a = 1;", "`b() ! ANY';"]), ("fresh", ["try"])]})
+    old_path = tmp_path / "old.db"
+    old_path.write_text("")
+    monkeypatch.setattr(cli, "open_indexed", lambda path, *_: old if Path(path) == old_path else new)
+    monkeypatch.setattr(cli, "load", lambda path: old if Path(path) == old_path else new)
+    r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "added", str(old_path)])
+    assert r.exit_code == 0, r.output
+    assert r.output.splitlines() == [
+        "#1:[0] move:2: `b() ! ANY';",
+        "#1:[1] fresh:1: try  (new verb)",
+        "2 added lines in 2 verbs",
+    ]
+    r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "added", "-l", str(old_path), "^try$"])
+    assert r.exit_code == 0, r.output
+    assert r.output.splitlines() == ['   1  #1 "obj1":[1] "fresh"  (new verb)', "1 added lines in 1 verbs"]
+
+    for option in ([], ["--no-cache"]):
+        r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), *option, "added", "-F", "-i", str(old_path), "TRY"])
+        assert r.exit_code == 0, r.output
+        assert "fresh:1: try  (new verb)" in r.output
+        r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), *option, "added", str(old_path), "("])
+        assert r.exit_code == 2 and "Invalid value for PATTERN" in r.output
+
+
+def test_added_pairs_duplicate_verbs_by_occurrence_and_marks_the_extra_one():
+    old = _verb_db({1: [("same", ["return 1;"]), ("same", ["return 2;"])]})
+    new = _verb_db({1: [("same", ["return 1;"]), ("same", ["return 3;"]), ("same", ["return 4;"])]})
+    assert [(h.index, h.line, h.is_new) for h in added_verb_lines(old, new)] == [
+        (1, "return 3;", False), (2, "return 4;", True),
+    ]
+
+
+def test_added_ignores_indentation_and_permission_changes_but_matches_argument_specs():
+    old = _verb_db({1: [("keep", ["  return 1;  "]), ("change", ["return 2;"])]})
+    new = _verb_db({1: [("keep", ["return 1;"]), ("change", ["return 2;"])]})
+    new.objects[1].verbs[0].perms ^= 1
+    new.objects[1].verbs[1].preps = 0
+    assert [(h.index, h.is_new) for h in added_verb_lines(old, new)] == [(1, True)]
+
+
+def test_added_existing_unprogrammed_verb_is_not_new():
+    old = _verb_db({1: [("empty", None)]})
+    new = _verb_db({1: [("empty", ["return 1;"])]})
+    assert [(h.line, h.is_new) for h in added_verb_lines(old, new)] == [("return 1;", False)]
 
 
 def test_cli_code_prop_grep_find_obj():

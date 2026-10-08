@@ -9,7 +9,9 @@ through parents in ``db_ancestors()`` order.
 
 from __future__ import annotations
 
+import difflib
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -259,6 +261,53 @@ def grep_verbs(db: MooDatabase, pattern: re.Pattern[str], objs: list[MooObject] 
             for n, line in enumerate(v.code or [], 1):
                 if pattern.search(line):
                     yield GrepHit(o, idx, v, n, line)
+
+
+def _verb_keys(obj: MooObject) -> dict[tuple[str, str, int], tuple[int, Verb]]:
+    """Each verb of obj under (names, arg spec, nth verb with those), so reordering does not unpair verbs."""
+    seen: Counter[tuple[str, str]] = Counter()
+    keyed = {}
+    for idx, v in enumerate(obj.verbs):
+        base = (v.name, verb_args(v))
+        keyed[(*base, seen[base])] = (idx, v)
+        seen[base] += 1
+    return keyed
+
+
+@attrs.frozen
+class AddedVerbLine(GrepHit):
+    is_new: bool
+
+
+def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str] | None = None) -> Iterator[AddedVerbLine]:
+    """Yield every verb code line in new that old's version of the same verb does not have.
+
+    Verbs pair by object number, exact names, argument spec and occurrence
+    among identical definitions. Lines align after stripping whitespace;
+    insertions and replacements are reported with their original text.
+    Moved lines can appear as additions. A verb or object that
+    is not in old has every line reported. With pattern, only added lines
+    matching it are yielded.
+    """
+    before_objects = old.objects_with_programs() if isinstance(old, LazyDatabase) else all_objects(old)
+    old_by_id = {o.id: o for o in before_objects}
+    after_objects = new.objects_with_programs() if isinstance(new, LazyDatabase) else all_objects(new)
+    for o in after_objects:
+        before = old_by_id.get(o.id)
+        if before is None:
+            # An existing object may have definitions but no programs yet.
+            before = old.objects.get(o.id)
+        old_verbs = _verb_keys(before) if before is not None else {}
+        for key, (idx, v) in _verb_keys(o).items():
+            code = [line.strip() for line in v.code or []]
+            was = [line.strip() for line in (old_verbs[key][1].code or [])] if key in old_verbs else []
+            matcher = difflib.SequenceMatcher(None, was, code, autojunk=False)
+            for tag, _, _, j1, j2 in matcher.get_opcodes():
+                if tag not in ("insert", "replace"):
+                    continue
+                for n in range(j1, j2):
+                    if pattern is None or pattern.search(v.code[n]):
+                        yield AddedVerbLine(o, idx, v, n + 1, v.code[n], key not in old_verbs)
 
 
 # --------------------------------------------------------------------------

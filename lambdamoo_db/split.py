@@ -100,7 +100,7 @@ class _BoundaryReader(Reader):
         # parse_v17 has just read the verb count; its line starts this piece.
         start = self.source.last_line_start
         count_line = self.source.data[start : self.source.offset]
-        if count_line != f"{db.total_verbs}\n".encode():
+        if count_line not in (f"{db.total_verbs}\n".encode(), f"{db.total_verbs}\r\n".encode()):
             self.parse_error(f"expected verb count line, found {count_line[:40]!r}")
         self.marks.append((start, "verbs" + PIECE_SUFFIX))
         super().readVerbs(db)

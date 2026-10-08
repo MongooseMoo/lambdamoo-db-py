@@ -58,7 +58,8 @@ def test_resplit_rewrites_only_changed_pieces(tmp_path):
     pieces = dict(split_bytes(data))
     target = next(name for name in pieces if name.startswith("verbs/"))
     old_piece = pieces[target]
-    new_piece = old_piece.replace(b"\n.\n", b"\n\"edited\";\n.\n", 1)
+    ending = b"\r\n" if b"\r\n" in old_piece else b"\n"
+    new_piece = old_piece.replace(ending + b"." + ending, ending + b'"edited";' + ending + b"." + ending, 1)
     assert new_piece != old_piece
     changed = data.replace(old_piece, new_piece, 1)
     stats = write_split(changed, tmp_path)
@@ -90,11 +91,12 @@ def test_tampered_piece_fails_join_and_is_located(tmp_path):
     assert first_difference(tmp_path, data).endswith("(offset 5 in objects/1.moo)")
 
 
-def test_line_endings_are_preserved(tmp_path):
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n"])
+def test_line_endings_are_preserved(tmp_path, ending):
     data = (PROJECT_ROOT / "tests" / "fixtures" / "TypedMapKeys.db").read_bytes()
-    assert b"\r" not in data
+    data = data.replace(b"\r\n", b"\n").replace(b"\n", ending)
     write_split(data, tmp_path)
-    assert b"\r" not in b"".join(p.read_bytes() for p in tmp_path.rglob("*.moo"))
+    assert join_dir(tmp_path) == data
     assert b"\r" not in (tmp_path / MANIFEST).read_bytes()
 
 
