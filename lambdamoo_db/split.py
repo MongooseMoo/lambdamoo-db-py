@@ -25,12 +25,13 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .database import MooDatabase
 from .enums import DBVersions
-from .reader import Reader
+from .reader import Reader, _LineSource
 
 MANIFEST = "MANIFEST"
 MAGIC = "# moodb-split 1"
@@ -47,36 +48,21 @@ class SplitError(Exception):
     pass
 
 
-class _LineSource:
-    """Minimal file object for Reader: splits on LF only and tracks byte offsets."""
-
-    def __init__(self, data: bytes) -> None:
-        self.data = data
-        self.offset = 0
-        self.last_line_start = 0
-
-    def readline(self) -> str:
-        data = self.data
-        start = self.offset
-        if start >= len(data):
-            return ""
-        end = data.find(b"\n", start)
-        end = len(data) if end == -1 else end + 1
-        self.last_line_start = start
-        self.offset = end
-        return data[start:end].decode("latin-1")
-
-
 class _BoundaryReader(Reader):
     """Reader that records (byte offset, piece name) wherever a piece starts."""
 
     def __init__(self, source: _LineSource) -> None:
-        super().__init__(source, "<split>")  # type: ignore[arg-type]
+        super().__init__(source, "<split>", _layout_only=True)  # type: ignore[arg-type]
         self.source = source
         self.marks: list[tuple[int, str]] = [(0, "header" + PIECE_SUFFIX)]
         self._in_anon = False
         self._last_verb_owner: str | None = None
         self._verb_names: dict[str, int] = {}
+
+    def parse(self) -> None:
+        # The model contains nonsemantic placeholders. Only byte boundaries
+        # escape this scanner; never expose it to semantic loading/comparison.
+        super().parse()
 
     def readObject_ng(self, db: MooDatabase) -> Any:
         if self._in_anon:
@@ -101,7 +87,7 @@ class _BoundaryReader(Reader):
         start = self.source.last_line_start
         count_line = self.source.data[start : self.source.offset]
         if count_line not in (f"{db.total_verbs}\n".encode(), f"{db.total_verbs}\r\n".encode()):
-            self.parse_error(f"expected verb count line, found {count_line[:40]!r}")
+            self.parse_error("expected verb count line")
         self.marks.append((start, "verbs" + PIECE_SUFFIX))
         super().readVerbs(db)
 
@@ -126,7 +112,7 @@ def split_bytes(data: bytes) -> list[tuple[str, bytes]]:
     """Cut a v17 dump into named pieces whose concatenation is exactly ``data``."""
     first_line = data[: data.find(b"\n")]
     if first_line.rstrip(b"\r") != _V17_HEADER:
-        raise SplitError(f"only format version 17 is supported, got {first_line[:60]!r}")
+        raise SplitError("only format version 17 is supported")
     source = _LineSource(data)
     reader = _BoundaryReader(source)
     reader.parse()
@@ -208,9 +194,17 @@ def write_split(
     return stats
 
 
-def read_manifest(in_dir: str | os.PathLike[str]) -> tuple[str, int, list[str]]:
-    """Return (sha256, size, piece names) from a split directory's MANIFEST."""
-    text = (Path(in_dir) / MANIFEST).read_text(encoding="ascii")
+def parse_manifest(data: bytes | str) -> tuple[str, int, list[str]]:
+    """Validate a manifest fully before any source pieces are accessed."""
+    try:
+        text = data.decode("ascii") if isinstance(data, bytes) else data
+        text.encode("ascii")
+    except (UnicodeError, AttributeError):
+        raise SplitError("MANIFEST must be ASCII") from None
+    if any(ord(char) < 32 and char not in "\r\n" or ord(char) == 127 for char in text):
+        raise SplitError("MANIFEST has invalid control characters")
+    if "\r" in text.replace("\r\n", ""):
+        raise SplitError("MANIFEST has invalid record delimiter")
     lines = text.splitlines()
     if not lines or lines[0] != MAGIC:
         raise SplitError(f"{MANIFEST} does not start with {MAGIC!r}")
@@ -219,37 +213,103 @@ def read_manifest(in_dir: str | os.PathLike[str]) -> tuple[str, int, list[str]]:
     for line in lines[1:]:
         if line.startswith("# "):
             key, _, value = line[2:].partition(" ")
+            if key not in ("sha256", "bytes", "pieces") or key in meta:
+                raise SplitError("MANIFEST has unknown or duplicate metadata")
             meta[key] = value
-        elif line:
+        else:
+            _validate_piece_name(line)
             names.append(line)
     for key in ("sha256", "bytes", "pieces"):
         if key not in meta:
             raise SplitError(f"{MANIFEST} is missing '# {key}'")
-    if int(meta["pieces"]) != len(names):
-        raise SplitError(f"{MANIFEST} lists {len(names)} pieces but declares {meta['pieces']}")
-    return meta["sha256"], int(meta["bytes"]), names
+    if not re.fullmatch(r"[0-9a-f]{64}", meta["sha256"]):
+        raise SplitError("MANIFEST has invalid sha256")
+    if any(not re.fullmatch(r"[0-9]+", meta[key]) for key in ("bytes", "pieces")):
+        raise SplitError("MANIFEST has invalid counts")
+    try:
+        pieces_count, size = int(meta["pieces"]), int(meta["bytes"])
+    except ValueError:
+        raise SplitError("MANIFEST has invalid counts") from None
+    if pieces_count != len(names):
+        raise SplitError("MANIFEST piece count mismatch")
+    if len(set(names)) != len(names):
+        raise SplitError("MANIFEST has duplicate piece names")
+    return meta["sha256"], size, names
+
+
+def _validate_piece_name(name: str) -> None:
+    if (not name or name.startswith("/") or "\\" in name or ":" in name
+            or any(part in ("", ".", "..") for part in name.split("/"))
+            or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+        raise SplitError("MANIFEST has unsafe piece name")
+
+
+def _regular_path(root: Path, name: str) -> Path:
+    """Resolve the caller's trusted root, then refuse links beneath it."""
+    _validate_piece_name(name)
+    try:
+        trusted_root = root.resolve(strict=True)
+        if not trusted_root.is_dir():
+            raise SplitError("split parent is not a directory")
+    except (OSError, RuntimeError):
+        raise SplitError("split path is missing or unreadable") from None
+    path = trusted_root
+    parts = name.split("/")
+    for index, part in enumerate(parts):
+        path = path / part
+        try:
+            status = path.lstat()
+            mode = status.st_mode
+        except OSError:
+            raise SplitError("split path is missing or unreadable") from None
+        if stat.S_ISLNK(mode) or getattr(status, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+            raise SplitError("split path contains a symlink")
+        if index < len(parts) - 1 and not stat.S_ISDIR(mode):
+            raise SplitError("split parent is not a directory")
+    if not stat.S_ISREG(mode):
+        raise SplitError("split piece is not a regular file")
+    return path
+
+
+def read_manifest(in_dir: str | os.PathLike[str]) -> tuple[str, int, list[str]]:
+    """Return validated (sha256, size, names) from a regular MANIFEST."""
+    return parse_manifest(_regular_path(Path(in_dir), MANIFEST).read_bytes())
+
+
+def join_parts(manifest: bytes | str, read_piece: Callable[[str], bytes]) -> bytes:
+    """Join validated ordered pieces from a filesystem or immutable Git source."""
+    sha256, size, names = parse_manifest(manifest)
+    pieces = []
+    for name in names:
+        piece = read_piece(name)
+        if not isinstance(piece, bytes):
+            raise SplitError("piece callback did not return bytes")
+        pieces.append(piece)
+    data = b"".join(pieces)
+    actual = hashlib.sha256(data).hexdigest()
+    if len(data) != size or actual != sha256:
+        raise SplitError(f"join mismatch: expected {size} bytes sha256 {sha256}, got {len(data)} bytes sha256 {actual}")
+    return data
 
 
 def join_dir(in_dir: str | os.PathLike[str]) -> bytes:
     """Reassemble a split directory and verify it against its MANIFEST."""
     root = Path(in_dir)
-    sha256, size, names = read_manifest(root)
-    data = b"".join((root / name).read_bytes() for name in names)
-    actual = hashlib.sha256(data).hexdigest()
-    if len(data) != size or actual != sha256:
-        raise SplitError(
-            f"join mismatch: expected {size} bytes sha256 {sha256}, " f"got {len(data)} bytes sha256 {actual}"
-        )
-    return data
+    manifest = _regular_path(root, MANIFEST).read_bytes()
+    _, _, names = parse_manifest(manifest)
+    # Preflight all paths before opening any piece.
+    paths = {name: _regular_path(root, name) for name in names}
+    return join_parts(manifest, lambda name: paths[name].read_bytes())
 
 
 def first_difference(in_dir: str | os.PathLike[str], original: bytes) -> str | None:
     """Describe where a split directory first diverges from ``original``, or None."""
     root = Path(in_dir)
     _, _, names = read_manifest(root)
+    paths = {name: _regular_path(root, name) for name in names}
     offset = 0
     for name in names:
-        piece = (root / name).read_bytes()
+        piece = paths[name].read_bytes()
         expected = original[offset : offset + len(piece)]
         if piece != expected:
             index = next((i for i, (a, b) in enumerate(zip(piece, expected)) if a != b), min(len(piece), len(expected)))

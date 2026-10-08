@@ -220,9 +220,19 @@ def verb_perms(verb: Verb) -> str:
     return "".join(c for bit, c in zip((VERB_READ, VERB_WRITE, VERB_EXEC, VERB_DEBUG), "rwxd") if verb.perms & bit)
 
 
+def verb_signature(verb: Verb) -> tuple[str, int, int, int]:
+    """The exact definition identity, shared by inspection and full diff."""
+    dobj = (verb.perms >> 4) & 3
+    iobj = (verb.perms >> 6) & 3
+    if dobj == 3 or iobj == 3:
+        raise ValueError('reserved verb argument encoding (3)')
+    return verb.name, dobj, verb.preps, iobj
+
+
 def verb_args(verb: Verb) -> str:
-    dobj = ARG_NAMES[(verb.perms >> 4) & 3]
-    iobj = ARG_NAMES[(verb.perms >> 6) & 3]
+    _, dobj_bits, _, iobj_bits = verb_signature(verb)
+    dobj = ARG_NAMES[dobj_bits]
+    iobj = ARG_NAMES[iobj_bits]
     if verb.preps == PREP_ANY:
         prep = "any"
     elif verb.preps == PREP_NONE:

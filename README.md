@@ -153,6 +153,96 @@ parser change gets a new index. Writing one deletes the stale ones for the
 same path, and the parsed-dump pickle that earlier versions kept there. Dumps
 older than format 17 have no index and are parsed whole.
 
+## Diff database checkpoints
+
+```sh
+moodb --db new.db diff old.db
+moodb --db new.db diff old.db --view code --object '#852'
+moodb --db new.db diff old.db --view checkpoint --format jsonl
+moodb --db new.db diff old.db --output-dir review-pair
+moodb diff-read review-pair --object '#852' --category code --limit 50
+moodb diff-read review-pair --event EVENT_ID --side old --range 1:80
+```
+
+The default `world` view compares permanent numeric object slots, definitions,
+stored property values, verb metadata and exact source, players, recycled slots,
+and reachable anonymous objects/waifs. `code` selects verb changes; `checkpoint`
+includes raw heap numbering, runtime tasks and stored serialization fields.
+Equality always refers to the selected scope. Numeric slot pairing assumes the
+same world; it cannot prove an object was not recycled between snapshots.
+
+Bundles contain `summary.md`, `objects.jsonl`, per-object Markdown, complete
+typed events and content-addressed large payloads. Agents can start with the
+summary and retrieve one object or payload range without opening either dump.
+Source ranges use one-based half-open line bounds; string/list/map ranges use
+zero-based half-open bounds. `diff-read` verifies digests, event IDs and indexes.
+Both source files are frozen and hashed before comparison; diff ignores the
+inspection offset cache and fully materializes the selected snapshots.
+
+Repeat `--section` to select scope and `--kind` to filter displayed events.
+Text defaults to 200 displayed events; JSON Lines and bundles default to all.
+`--max-events 0` scans everything and shows only the summary. `--stop-after N`
+stops comparison and reports an incomplete scan. Exit codes are 0 equal, 1
+different, 2 error/incomplete, 3 unknown identity. Display filters and limits
+do not hide a changed status. `--format` and `--output-dir` are mutually exclusive.
+
+```sh
+moodb history --repo /path/to/mongoose_db --from OLD_SHA --to NEW_SHA --output-dir review-history
+moodb history --repo /path/to/mongoose_db --from OLD_SHA --to NEW_SHA --mode adjacent --output-dir review-timeline
+moodb history --repo /path/to/mongoose_db --branch master --from-date 2026-01-01T00:00:00Z --to-date 2026-02-01T00:00:00Z --output-dir review-month
+moodb diff-read review-timeline --edge EDGE_ID --object '#852'
+```
+
+History reads immutable local Git blobs, preferring verified `db/MANIFEST`
+pieces over `mongoose.db.new`; it never checks out or fetches commits.
+Endpoint mode compares just the endpoints. Adjacent mode follows first parents
+and retains each transition, including reversions. The default cap is 100 edges;
+`--max-edges` raises it explicitly. `--keep-going` records failed edges and keeps
+exit 2. Date selection pins the declared branch once and uses committer time;
+checkpoint time remains unknown without recognized backup metadata.
+`--resume-from PREVIOUS_REPORT` validates and reuses matching completed edges
+into a new output directory. Caught errors and user interrupts retain the
+verified completed prefix with covered and requested endpoints and exit 2.
+Existing destinations are refused. History and
+diff-read ignore `MOODB` and reject an explicit global `--db`.
+
+Optional redaction uses a declarative JSON file:
+
+```json
+{"schema_version":1,"rules":[{"selector":{"section":"properties","definer":"42","name":"api_key","occurrence":"*"},"action":"conceal"}]}
+```
+
+Pass `--redact rules.json`; `--redact-strict` makes unmatched selectors an error
+(history aggregates matches across edges). Selectors cover whole sections,
+properties by definer/exact name/occurrence, verbs by object/exact full
+name/occurrence, waif class/slot, or object name/aliases. Concealment propagates
+through heap graphs and derived labels and coalesces concealed changes before
+publishing counts and IDs. Whole-property rules include waif slots, definition
+rules cover matching waif class definitions, and whole-verb rules include
+reachable anonymous source. Whole-section match totals record whether
+each side covers an eligible container, including empty containers;
+concealed owner, property and program counts stay hidden.
+Runtime is concealed by default with any policy;
+a runtime section rule with action `reveal_runtime` opts in. Redaction cannot
+be combined with `--stop-after`.
+
+See the [full diff and history specification](specs/full-diff.md) for pairing,
+typed values, uncertainty, coverage and report integrity contracts. Reader
+input that would collapse legal typed map keys fails explicitly. Numeric map
+keys follow the declared Toast Num64/int32 GNU comparator policy; integer/object
+keys retain signed64 raw payloads and compare by the narrowed server key identity.
+Out-of-width keys, NaN keys and NUL string keys are explicitly unsupported;
+ordinary scalar values retain their parsed precision. The first
+release materializes both snapshots and reachable heap evidence. A large world
+comparison can take minutes and several gigabytes of RAM. Start with `--view code`
+for source review, or `--object '#852'` to focus a world report. Source loading
+still parses the complete snapshots. Streaming and dependency-based history
+skipping remain future work.
+
+Raw `split`/`join` still preserve unsupported map bytes: their private boundary
+scanner does not construct semantic dictionaries. Diff and inspection loaders
+keep the strict fidelity checks.
+
 ## Compare loaded databases
 
 ```python

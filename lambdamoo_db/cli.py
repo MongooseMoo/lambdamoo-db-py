@@ -94,7 +94,7 @@ def moodb_join(indir: str, outfile: str | None, compare: str | None) -> None:
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--db", "db_path", envvar="MOODB", type=click.Path(exists=True, dir_okay=False),
+@click.option("--db", "db_path", envvar="MOODB", type=str,
               help="Textdump to read (or set MOODB).")
 @click.option("--no-cache", is_flag=True, help="Parse the whole dump, without reading or writing its offset index.")
 @click.option("--cache-dir", type=click.Path(file_okay=False), default=None,
@@ -112,6 +112,12 @@ def moodb(ctx: click.Context, db_path: str | None, no_cache: bool, cache_dir: st
     each record is. Later queries read only the records they need. `batch`
     answers several queries in one run.
     """
+    if ctx.invoked_subcommand in ('history', 'diff-read'):
+        if ctx.get_parameter_source('db_path') == click.core.ParameterSource.COMMANDLINE:
+            raise click.UsageError('--db is not used by history or diff-read')
+        db_path = None
+    elif ctx.invoked_subcommand != 'diff' and db_path is not None:
+        db_path = click.Path(exists=True, dir_okay=False).convert(db_path, None, ctx)
     cache = None if no_cache else Path(cache_dir) if cache_dir else default_cache_dir()
     ctx.obj = {"path": db_path, "cache": cache}
 
@@ -515,3 +521,186 @@ def tasks(ctx: click.Context, verbose: bool) -> None:
         if verbose:
             for depth, a in enumerate(t.frames):
                 click.echo(f"    {depth}: {frame_text(a)}")
+
+
+def _report_options(function):
+    """Identical semantic and presentation options for pairs and history edges."""
+    from .diff_types import SECTIONS, KINDS
+    decorators = [
+        click.option('--view', type=click.Choice(['world', 'checkpoint', 'code']), default='world', show_default=True),
+        click.option('-o', '--object', 'references', multiple=True),
+        click.option('--section', 'sections', multiple=True, type=click.Choice(SECTIONS)),
+        click.option('--kind', 'kinds', multiple=True, type=click.Choice(KINDS)),
+        click.option('--context', type=click.IntRange(min=0), default=3, show_default=True),
+        click.option('--max-events', type=click.IntRange(min=0), default=None),
+        click.option('--stop-after', type=click.IntRange(min=1), default=None),
+        click.option('--redact', type=click.Path(dir_okay=False), default=None),
+        click.option('--redact-strict', is_flag=True),
+    ]
+    for decorator in reversed(decorators):
+        function = decorator(function)
+    return function
+
+
+def _validate_report_options(view, sections, stop_after, context, redact, redact_strict):
+    from .diff_types import ReportOptions
+    if stop_after is not None and redact:
+        raise ValueError('--stop-after cannot be combined with --redact')
+    if redact_strict and not redact:
+        raise ValueError('--redact-strict requires --redact')
+    options = ReportOptions(view=view, sections=sections or None, stop_after=stop_after, context=context)
+    if redact:
+        from .diff_redaction import RedactionPolicy
+        policy = RedactionPolicy.from_file(redact)
+    else:
+        policy = None
+    return options, policy
+
+
+def _report_failure(ctx, error, *, jsonl=False):
+    """Machine failures still end with a footer, including before parsing starts."""
+    if jsonl:
+        import json
+        click.echo(json.dumps({'record': 'header', 'schema_version': 1}))
+        click.echo(json.dumps({'record': 'footer', 'status': 'error', 'scan_complete': False,
+                               'identity_complete': False, 'details_complete': False, 'payloads_complete': False,
+                               'errors': [str(error)]}))
+    else:
+        click.echo(f'Error: {error}', err=True)
+    ctx.exit(2)
+
+
+@moodb.command('diff')
+@click.argument('old_path', type=click.Path(dir_okay=False))
+@click.option('--format', 'output_format', type=click.Choice(['text', 'jsonl']), default='text')
+@click.option('--output-dir', type=click.Path(file_okay=False), default=None)
+@_report_options
+@click.pass_context
+def diff(ctx, old_path, output_format, output_dir, view, references, sections, kinds, context, max_events, stop_after, redact, redact_strict):
+    """Compare OLD_PATH to --db NEW with typed, exact evidence."""
+    from dataclasses import replace
+    from .compare import compare_snapshots
+    from .diff_sources import freeze_source, select_objects, SourceError
+    jsonl_started = False
+    try:
+        if output_dir and ctx.get_parameter_source('output_format') == click.core.ParameterSource.COMMANDLINE:
+            raise ValueError('--format and --output-dir cannot be combined')
+        options, policy = _validate_report_options(view, sections, stop_after, context, redact, redact_strict)
+        if not ctx.obj['path']:
+            raise ValueError('No NEW dump given: pass --db DUMP or set MOODB')
+        old, new = freeze_source(old_path), freeze_source(ctx.obj['path'])
+        options = replace(options, object_ids=select_objects(old.db, new.db, references))
+        comparison = compare_snapshots(old.db, new.db, options)
+        comparison.header['sources'] = {'old': old.metadata, 'new': new.metadata}
+        if policy:
+            policy.bind(old.db, new.db, options)
+        from .diff_report import prepare_report, render_text, iter_jsonl, write_bundle
+        if max_events is None and not output_dir and output_format == 'text':
+            max_events = 200
+        report = prepare_report(comparison, kinds=kinds, max_events=max_events, redaction=policy, redact_strict=redact_strict)
+        if output_dir:
+            write_bundle(report, output_dir)
+            click.echo(f'{report.footer["status"]}: bundle {output_dir}')
+        elif output_format == 'jsonl':
+            for line in iter_jsonl(report):
+                jsonl_started = True
+                click.echo(line, nl=False)
+        else:
+            click.echo(render_text(report, context=context))
+    except (SourceError, ValueError, OSError) as error:
+        if jsonl_started:
+            # iter_jsonl owns its partial-stream error footer. A second header
+            # or footer here would corrupt the machine record sequence.
+            ctx.exit(2)
+        _report_failure(ctx, error, jsonl=output_format == 'jsonl' and not output_dir)
+    ctx.exit(report.exit_code)
+
+
+@moodb.command('diff-read')
+@click.argument('bundle', type=click.Path(file_okay=False))
+@click.option('--event', default=None)
+@click.option('--object', 'object_id', default=None)
+@click.option('--category', type=click.Choice(['code','definitions','values','heap','runtime','serialization']), default=None)
+@click.option('--offset', type=click.IntRange(min=0), default=0)
+@click.option('--limit', type=click.IntRange(min=1), default=50)
+@click.option('--side', type=click.Choice(['old','new']), default=None)
+@click.option('--range', 'value_range', default=None)
+@click.option('--edge', default=None)
+@click.pass_context
+def diff_read(ctx, bundle, event, object_id, category, offset, limit, side, value_range, edge):
+    """Retrieve verified evidence without reopening either source dump."""
+    from .diff_types import canonical_json
+    try:
+        if value_range:
+            match = re.fullmatch(r'(\d+):(\d+)', value_range)
+            if not match or int(match[1]) > int(match[2]):
+                raise ValueError('--range requires ordered START:END bounds')
+            value_range = tuple(map(int, match.groups()))
+            if not event or not side:
+                raise ValueError('--range requires --event and --side')
+        import json
+        root = Path(bundle)
+        manifest = json.loads((root / 'manifest.json').read_bytes())
+        if not isinstance(manifest, dict):
+            raise ValueError('Invalid bundle manifest structure')
+        if manifest.get('report_type') == 'history':
+            from .diff_history import read_history
+            result = read_history(root, edge=edge, event=event, object_id=object_id, category=category,
+                                  offset=offset, limit=limit, side=side, value_range=value_range)
+        else:
+            if edge:
+                raise ValueError('--edge requires a history bundle')
+            from .diff_report import read_bundle
+            result = read_bundle(root, event=event, object_id=object_id, category=category,
+                                 offset=offset, limit=limit, side=side, value_range=value_range)
+        click.echo(canonical_json(result).decode('utf-8'))
+    except (ValueError, OSError) as error:
+        _report_failure(ctx, error)
+
+
+@moodb.command('history')
+@click.option('--repo', required=True, type=click.Path(file_okay=False))
+@click.option('--from', 'start', default=None)
+@click.option('--to', 'end', default=None)
+@click.option('--from-date', default=None)
+@click.option('--to-date', default=None)
+@click.option('--branch', default=None)
+@click.option('--mode', type=click.Choice(['endpoints','adjacent']), default='endpoints', show_default=True)
+@click.option('--output-dir', required=True, type=click.Path(file_okay=False))
+@click.option('--max-edges', type=click.IntRange(min=1), default=100, show_default=True)
+@click.option('--keep-going', is_flag=True)
+@click.option('--split-prefix', default='db', show_default=True)
+@click.option('--legacy-path', default='mongoose.db.new', show_default=True)
+@click.option('--source-layout', type=click.Choice(['auto','legacy']), default='auto')
+@click.option('--resume-from', type=click.Path(file_okay=False), default=None, help='Reuse verified matching edges from a previous report; output goes to a new directory.')
+@_report_options
+@click.pass_context
+def history(ctx, repo, start, end, from_date, to_date, branch, mode, output_dir, max_edges, keep_going,
+            split_prefix, legacy_path, source_layout, resume_from, view, references, sections, kinds,
+            context, max_events, stop_after, redact, redact_strict):
+    """Compare immutable local Git checkpoints, as endpoints or adjacent edges."""
+    from .diff_git import GitRepository
+    from .diff_history import build_history
+    from .diff_sources import SourceError
+    try:
+        options, policy = _validate_report_options(view, sections, stop_after, context, redact, redact_strict)
+        if bool(start) == bool(from_date) or bool(end) == bool(to_date):
+            raise ValueError('Choose exactly one of --from/--from-date and one of --to/--to-date')
+        if (from_date or to_date) and not branch:
+            raise ValueError('Date selection requires --branch')
+        repository = GitRepository(repo)
+        selection = {'from_date': from_date, 'to_date': to_date}
+        if from_date or to_date:
+            tip = repository.resolve(branch)
+            selection['branch_tip'] = tip
+            start = repository.resolve_date(tip, from_date) if from_date else repository.resolve(start)
+            end = repository.resolve_date(tip, to_date) if to_date else repository.resolve(end)
+        manifest = build_history(repo, start, end, output_dir, mode=mode, options=options,
+                                 references=references, kinds=kinds, max_events=max_events,
+                                 max_edges=max_edges, keep_going=keep_going, split_prefix=split_prefix,
+                                 legacy_path=legacy_path, source_layout=source_layout, redaction=policy,
+                                 redact_strict=redact_strict, resume_from=resume_from, selection=selection)
+        click.echo(f'{manifest["status"]}: {manifest["edge_count"]} edges; bundle {output_dir}')
+    except (SourceError, ValueError, OSError) as error:
+        _report_failure(ctx, error)
+    ctx.exit({'equal':0, 'different':1, 'error':2, 'unknown':3}[manifest['status']])

@@ -29,7 +29,7 @@ _OBJECT_LINE = re.compile(rb"#\s*(\d+)")
 _VERB_LINE = re.compile(rb"#(\d+):(\d+)\r?\n")
 
 # Modules whose code decides what the index holds and what a record parses to.
-_INDEX_KEY_MODULES = ("reader.py", "database.py", "enums.py", "templates.py", "split.py", "lazy.py")
+_INDEX_KEY_MODULES = ("reader.py", "database.py", "enums.py", "templates.py", "split.py", "map_keys.py", "lazy.py")
 
 
 @attrs.frozen
