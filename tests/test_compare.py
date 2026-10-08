@@ -544,7 +544,7 @@ class TestCompareProperties:
         diffs = compare_properties(DiffPath.object(1), props1, props2)
         assert len(diffs) == 1
         assert diffs[0].kind == DiffKind.VALUE_CHANGED
-        assert "name" in str(diffs[0].path)
+        assert str(diffs[0].path) == "#1.properties[0].value"
 
     def test_different_owner(self):
         from lambdamoo_db.compare import DiffPath, DiffKind, compare_properties

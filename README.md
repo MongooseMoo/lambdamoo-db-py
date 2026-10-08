@@ -153,6 +153,29 @@ parser change gets a new index. Writing one deletes the stale ones for the
 same path, and the parsed-dump pickle that earlier versions kept there. Dumps
 older than format 17 have no index and are parsed whole.
 
+## Compare loaded databases
+
+```python
+from lambdamoo_db.compare import compare_databases
+from lambdamoo_db.reader import load
+
+result = compare_databases(load("old.db"), load("new.db"))
+print(result.report())
+```
+
+The structural comparison includes saved queued, suspended and interrupted
+tasks, their VM/activation fields and runtime values, clocks, connection
+records, header counts and stored format metadata. Object and verb records,
+waifs and pending finalization values are compared too. Existing float
+tolerances still apply; this is not a byte comparison.
+
+Property lists compare by stored slot position, including each slot's name,
+value, owner and permissions. Duplicate inherited names stay distinct, and
+reordering slots is a change. Paths use zero-based indexes, for example
+`#1.properties[0].value` and `suspendedTasks[0].vm.stack[0].pc`.
+`ignore_fields` accepts top-level model names such as `suspendedTasks` or
+`connections`; `max_diffs` limits returned differences.
+
 ## Find object references in properties
 
 ```python
