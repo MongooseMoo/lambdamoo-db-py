@@ -4,13 +4,14 @@ import os
 import re
 import shutil
 from typing import Any, Optional
-import cattrs
 import attrs
+import cattrs
 from cattrs.gen import make_dict_unstructure_fn
 from lambdamoo_db.database import Anon, Clear, MooCatch, MooError, MooFinally, ObjNum, WaifReference, MooDatabase
 
 
 _json_converter = cattrs.Converter(unstruct_collection_overrides={set: list})
+# Include reader-populated fields such as properties, verbs and task state.
 _json_converter.register_unstructure_hook_factory(
     attrs.has,
     lambda cls: make_dict_unstructure_fn(cls, _json_converter, _cattrs_include_init_false=True),

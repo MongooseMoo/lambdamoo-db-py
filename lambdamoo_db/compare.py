@@ -535,10 +535,13 @@ def compare_databases(
         if not _add_diffs(recycled_diffs):
             return CompareResult(diffs)
 
-    # Compare pending_anon_ids
-    if "pending_anon_ids" not in ignore:
-        anon_diffs = compare_values(root.child("pending_anon_ids"), expected.pending_anon_ids, actual.pending_anon_ids)
-        if not _add_diffs(anon_diffs):
+    if "pending_values" not in ignore:
+        pending_diffs = compare_values(
+            root.child("pending_values"),
+            expected.pending_values,
+            actual.pending_values,
+        )
+        if not _add_diffs(pending_diffs):
             return CompareResult(diffs)
 
     # Compare objects

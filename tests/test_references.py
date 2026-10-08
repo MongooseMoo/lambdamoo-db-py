@@ -42,6 +42,7 @@ def database_with_value(value):
     db = MooDatabase()
     obj = MooObject(0, "System", 0, 7, -1)
     obj.properties.append(Property("example", value, 7, 0))
+    obj.propdefs_count = 1
     db.objects[0] = obj
     return db
 

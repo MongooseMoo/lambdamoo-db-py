@@ -90,6 +90,11 @@ class MooObject:
     properties: list[Property] = attrs.field(init=False, factory=list)
     propdefs_count: int = attrs.field(init=False, default=0)  # Properties defined on this object (not inherited)
     anon: bool = attrs.field(default=False)
+    v4_blank_line: str = attrs.field(init=False, default="")
+    v4_first_content: int = attrs.field(init=False, default=-1)
+    v4_neighbor: int = attrs.field(init=False, default=-1)
+    v4_first_child: int = attrs.field(init=False, default=-1)
+    v4_sibling: int = attrs.field(init=False, default=-1)
 
     @property
     def parent(self) -> int:
@@ -123,7 +128,7 @@ class Activation:
     player: int | None = attrs.field(init=False, default=None)
     programmer: int | None = attrs.field(init=False, default=None)
     vloc: int | None = attrs.field(init=False, default=None)
-    debug: bool = attrs.field(init=False)
+    debug: int = attrs.field(init=False)
     verb: str = attrs.field(init=False)
     verbname: str = attrs.field(init=False)
     code: list[str] = attrs.field(init=False, factory=list)
@@ -143,6 +148,12 @@ class Activation:
     bi_func: int = attrs.field(init=False, default=0)  # Built-in function flag
     error: int = attrs.field(init=False, default=0)  # Error value
     bi_func_name: str | None = attrs.field(init=False, default=None)  # Built-in function name
+    bi_func_data: list[str] = attrs.field(init=False, factory=list)  # State lines the built-in saved after its name
+    language_version: int | None = attrs.field(init=False, default=None)
+    argstr: str = attrs.field(init=False, default="No")
+    dobjstr: str = attrs.field(init=False, default="More")
+    prepstr: str = attrs.field(init=False, default="Parse")
+    iobjstr: str = attrs.field(init=False, default="Infos")
 
 
 @attrs.define()
@@ -159,8 +170,8 @@ class VM:
 @attrs.define()
 class QueuedTask:
     firstLineno: int
-    id: int
-    st: int
+    id: int  # task id
+    st: int  # start time (Unix seconds)
     unused: int = attrs.field(init=False, default=0)
     value: Any = attrs.field(init=False, default=None)
     activation: Activation | None = attrs.field(init=False)
@@ -211,12 +222,44 @@ class MooDatabase:
     waifs: dict[int, Waif] = attrs.field(factory=dict)
     players: list[int] = attrs.field(factory=list)
     recycled_objects: set[int] = attrs.field(factory=set)
-    pending_anon_ids: list[int] = attrs.field(factory=list)  # For pre-creating anons in pending section
+    pending_values: list[Any] = attrs.field(factory=list)
     connections: list[str] = attrs.field(factory=list)  # Connection lines for roundtrip
     connections_with_listeners: str = attrs.field(default=" with listeners")  # Listener tag suffix
+    has_connections_section: bool = attrs.field(default=False)
     line_ending: str = attrs.field(default="\n")  # Line ending style for roundtrip (\n or \r\n)
+    v4_dummy: str = attrs.field(default="0")
 
     def all_verbs(self) -> Generator[Verb, None, None]:
         for obj in self.objects.values():
             for verb in obj.verbs:
                 yield verb
+
+    def object_names(self) -> dict[int, str]:
+        """The name of every object, by object number."""
+        return {oid: obj.name for oid, obj in self.objects.items()}
+
+    def name_of(self, oid: int) -> str | None:
+        """An object's name, or None if there is no such object."""
+        obj = self.objects.get(oid)
+        return None if obj is None else obj.name
+
+    def ancestors(self, obj: MooObject) -> list[MooObject]:
+        """obj, then its ancestors in ToastStunt db_ancestors() order.
+
+        Depth-first through parents in declared order, each object once, missing
+        parents skipped. This is the order of inherited property slots and of
+        verb lookup.
+        """
+        order = [obj]
+        seen = {obj.id}
+
+        def visit(o: MooObject) -> None:
+            for p in o.parents:
+                parent = self.objects.get(int(p))
+                if parent is not None and parent.id not in seen:
+                    seen.add(parent.id)
+                    order.append(parent)
+                    visit(parent)
+
+        visit(obj)
+        return order
