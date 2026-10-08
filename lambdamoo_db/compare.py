@@ -10,7 +10,11 @@ import math
 from typing import Any, Iterator
 import attrs
 
-from .database import Clear, WaifReference, MooObject, Verb, Property, Waif, MooDatabase
+from .database import Activation, Clear, InterruptedTask, MooDatabase, MooObject, Property, QueuedTask, SuspendedTask, VM, Verb, Waif, WaifReference
+
+
+_SAVED_STATE_TYPES = (Activation, VM, QueuedTask, SuspendedTask, InterruptedTask)
+_UNSET = object()
 
 
 class DiffKind(enum.Enum):
@@ -180,6 +184,9 @@ def compare_values(path: DiffPath, expected: Any, actual: Any) -> list[Diff]:
     if isinstance(expected, dict):
         return _compare_dicts(path, expected, actual)
 
+    if isinstance(expected, _SAVED_STATE_TYPES):
+        return _compare_attrs(path, expected, actual)
+
     # Handle floats with tolerance
     if isinstance(expected, float):
         if math.isclose(expected, actual, rel_tol=1e-9, abs_tol=1e-12):
@@ -238,50 +245,38 @@ def _compare_dicts(path: DiffPath, expected: dict, actual: dict) -> list[Diff]:
     return diffs
 
 
+def _compare_attrs(path: DiffPath, expected: Any, actual: Any) -> list[Diff]:
+    """Compare all declared fields, including reader-populated init=False state."""
+    diffs: list[Diff] = []
+    for field in attrs.fields(type(expected)):
+        before = getattr(expected, field.name, _UNSET)
+        after = getattr(actual, field.name, _UNSET)
+        field_path = path.child(field.name)
+        if before is _UNSET and after is _UNSET:
+            continue
+        if before is _UNSET:
+            diffs.append(Diff(field_path, DiffKind.EXTRA, None, after))
+        elif after is _UNSET:
+            diffs.append(Diff(field_path, DiffKind.MISSING, before, None))
+        else:
+            diffs.extend(compare_values(field_path, before, after))
+    return diffs
+
+
 def compare_properties(
     path: DiffPath, expected: list[Property], actual: list[Property]
 ) -> list[Diff]:
-    """Compare two property lists."""
+    """Compare serialized property slots in order; inherited names may repeat."""
     diffs: list[Diff] = []
-
-    # Build dicts keyed by property name
-    exp_by_name = {p.propertyName: p for p in expected}
-    act_by_name = {p.propertyName: p for p in actual}
-
-    all_names = set(exp_by_name.keys()) | set(act_by_name.keys())
-
-    for name in sorted(all_names, key=str):
-        prop_path = path.child("properties").child(name)
-
-        if name not in act_by_name:
-            diffs.append(Diff(prop_path, DiffKind.MISSING, exp_by_name[name], None))
-        elif name not in exp_by_name:
-            diffs.append(Diff(prop_path, DiffKind.EXTRA, None, act_by_name[name]))
+    slots = path.child("properties")
+    for index in range(max(len(expected), len(actual))):
+        slot_path = slots.child(index)
+        if index >= len(actual):
+            diffs.append(Diff(slot_path, DiffKind.MISSING, expected[index], None))
+        elif index >= len(expected):
+            diffs.append(Diff(slot_path, DiffKind.EXTRA, None, actual[index]))
         else:
-            exp_prop = exp_by_name[name]
-            act_prop = act_by_name[name]
-
-            # Compare value
-            diffs.extend(compare_values(prop_path.child("value"), exp_prop.value, act_prop.value))
-
-            # Compare owner
-            if exp_prop.owner != act_prop.owner:
-                diffs.append(Diff(
-                    prop_path.child("owner"),
-                    DiffKind.VALUE_CHANGED,
-                    exp_prop.owner,
-                    act_prop.owner,
-                ))
-
-            # Compare perms
-            if exp_prop.perms != act_prop.perms:
-                diffs.append(Diff(
-                    prop_path.child("perms"),
-                    DiffKind.VALUE_CHANGED,
-                    exp_prop.perms,
-                    act_prop.perms,
-                ))
-
+            diffs.extend(_compare_attrs(slot_path, expected[index], actual[index]))
     return diffs
 
 
@@ -399,6 +394,9 @@ def compare_objects(path: DiffPath, expected: MooObject, actual: MooObject) -> l
 
     if expected.anon != actual.anon:
         diffs.append(Diff(path.child("anon"), DiffKind.VALUE_CHANGED, expected.anon, actual.anon))
+
+    for field in ("v4_blank_line", "v4_first_content", "v4_neighbor", "v4_first_child", "v4_sibling"):
+        diffs.extend(compare_values(path.child(field), getattr(expected, field), getattr(actual, field)))
 
     # Compare list fields
     diffs.extend(compare_values(path.child("parents"), expected.parents, actual.parents))
@@ -543,6 +541,14 @@ def compare_databases(
         )
         if not _add_diffs(pending_diffs):
             return CompareResult(diffs)
+
+    for field in (
+        "total_verbs", "total_players", "clocks", "queuedTasks", "suspendedTasks", "interruptedTasks",
+        "connections", "connections_with_listeners", "has_connections_section", "line_ending", "v4_dummy",
+    ):
+        if field not in ignore:
+            if not _add_diffs(compare_values(root.child(field), getattr(expected, field), getattr(actual, field))):
+                return CompareResult(diffs)
 
     # Compare objects
     if "objects" not in ignore:
