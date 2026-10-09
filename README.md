@@ -239,7 +239,13 @@ Text defaults to 200 displayed events; JSON Lines and bundles default to all.
 `--max-events 0` scans everything and shows only the summary. `--stop-after N`
 stops comparison and reports an incomplete scan. Exit codes are 0 equal, 1
 different, 2 error/incomplete, 3 unknown identity. Display filters and limits
-do not hide a changed status. `--format` and `--output-dir` are mutually exclusive.
+do not hide a changed status.
+
+`--output-dir` alone writes the bundle and prints `STATUS: bundle DIR`. Add
+`--format text` or `--format jsonl` to also get that report on standard output
+from the same comparison; the `STATUS: bundle DIR` line then goes to standard
+error. Each keeps its own default limit and the bundle is written first, so a
+refused directory fails before any report is printed.
 
 ```sh
 moodb history --repo /path/to/mongoose_db --from OLD_SHA --to NEW_SHA --output-dir review-history

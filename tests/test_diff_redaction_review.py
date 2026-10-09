@@ -39,6 +39,21 @@ def test_checkpoint_bare_waif_lifecycle_slot_concealed_in_artifacts(tmp_path, re
     assert all(b'TOPSECRET' not in path.read_bytes() for path in (tmp_path / 'bundle').rglob('*') if path.is_file())
 
 
+@pytest.mark.parametrize('limit', [0, 1])
+def test_relimiting_a_redacted_report_equals_redacting_with_that_limit(limit):
+    empty = database()
+    full = database(waifs={3: Waif(5, 1, [(0, 'TOPSECRET')])})
+    options = ReportOptions(view='checkpoint', sections=('heap',))
+    rule = conceal({'section': 'heap', 'waif_class': 5, 'slot': 0})
+    direct = prepare_report(compare_snapshots(empty, full, options), max_events=limit,
+                            redaction=policy(rule).bind(empty, full, options))
+    complete = prepare_report(compare_snapshots(empty, full, options), redaction=policy(rule).bind(empty, full, options))
+    relimited = prepare_report(complete, max_events=limit)
+    assert complete.footer['displayed_events'] >= 1
+    assert (relimited.header, relimited.events, relimited.footer) == (direct.header, direct.events, direct.footer)
+    assert render_text(relimited) == render_text(direct)
+
+
 def test_heap_rule_dangling_reference_bind_raises_safe_value_error():
     o = MooObject(1, 'public', 0, 1, -1)
     o.properties = [Property('p', WaifReference(7), 1, 0)]

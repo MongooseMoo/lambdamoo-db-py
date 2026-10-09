@@ -41,7 +41,7 @@ moodb diff-read review-pair --event EVENT_ID --side old --range 1:80
 moodb diff-read review-pair --object '#852' --category code --offset 0 --limit 50
 ```
 
-`diff`: OLD is the positional argument; NEW comes from `--db`. Validate view, format, selectors and output options before loading. Views are `world` (default), `checkpoint`, and `code`; formats are `text` (default) and `jsonl`. `--output-dir` writes a bundle and prints a brief location/summary. Format and output-dir cannot be combined.
+`diff`: OLD is the positional argument; NEW comes from `--db`. Validate view, format, selectors and output options before loading. Views are `world` (default), `checkpoint`, and `code`; formats are `text` (default) and `jsonl`. `--output-dir` writes a bundle and prints a brief location/summary. An explicit `--format` with `--output-dir` also writes that format to standard output from the same comparison, exactly as it would be without the bundle, and moves the location line to standard error; the bundle is published first, and each sink keeps its own default event limit.
 
 `-o/--object` is repeatable and accepts existing inspection reference syntax. A numeric ID can select an object removed from NEW; accept it if either side has that slot, otherwise fail. Resolve named references separately in each side; if they identify different permanent IDs or resolve on only one side, reject with available IDs and require numeric selectors. Include reachable heap dependencies; do not implicitly select descendants or ancestors' changes. Ancestors needed to label stored slots are loading dependencies only.
 

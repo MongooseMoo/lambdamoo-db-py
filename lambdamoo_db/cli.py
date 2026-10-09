@@ -629,14 +629,20 @@ def _report_failure(ctx, error, *, jsonl=False):
 @_report_options
 @click.pass_context
 def diff(ctx, old_path, output_format, output_dir, view, references, sections, kinds, context, max_events, stop_after, redact, redact_strict):
-    """Compare OLD_PATH to --db NEW with typed, exact evidence."""
+    """Compare OLD_PATH to --db NEW with typed, exact evidence.
+
+    --output-dir writes a bundle and prints its location. Give --format as
+    well to also get that report on standard output, from the same
+    comparison; the bundle location then goes to standard error.
+    """
     from dataclasses import replace
     from .compare import compare_snapshots
     from .diff_sources import freeze_source, select_objects, SourceError
     jsonl_started = False
+    # Standard output carries the formatted report unless a bundle was asked
+    # for without naming a format.
+    stream = not output_dir or ctx.get_parameter_source('output_format') == click.core.ParameterSource.COMMANDLINE
     try:
-        if output_dir and ctx.get_parameter_source('output_format') == click.core.ParameterSource.COMMANDLINE:
-            raise ValueError('--format and --output-dir cannot be combined')
         options, policy = _validate_report_options(view, sections, stop_after, context, redact, redact_strict)
         if not ctx.obj['path']:
             raise ValueError('No NEW dump given: pass --db DUMP or set MOODB')
@@ -647,24 +653,32 @@ def diff(ctx, old_path, output_format, output_dir, view, references, sections, k
         if policy:
             policy.bind(old.db, new.db, options)
         from .diff_report import prepare_report, render_text, iter_jsonl, write_bundle
-        if max_events is None and not output_dir and output_format == 'text':
-            max_events = 200
-        report = prepare_report(comparison, kinds=kinds, max_events=max_events, redaction=policy, redact_strict=redact_strict)
+        # Each sink keeps its own default limit: text shows 200 events, JSON
+        # Lines and bundles show all.
+        stream_limit = 200 if max_events is None and output_format == 'text' else max_events
+        report = prepare_report(comparison, kinds=kinds, max_events=max_events if output_dir else stream_limit,
+                                redaction=policy, redact_strict=redact_strict)
         if output_dir:
+            # The bundle is published before any report line is printed, so a
+            # refused destination cannot follow a finished-looking stream.
             write_bundle(report, output_dir)
-            click.echo(f'{report.footer["status"]}: bundle {output_dir}')
-        elif output_format == 'jsonl':
+            click.echo(f'{report.footer["status"]}: bundle {output_dir}', err=stream)
+            if stream and stream_limit != max_events:
+                # Re-limit the already redacted and identified events; the
+                # dumps are not compared again and the policy is not reapplied.
+                report = prepare_report(report, kinds=kinds, max_events=stream_limit)
+        if stream and output_format == 'jsonl':
             for line in iter_jsonl(report):
                 jsonl_started = True
                 click.echo(line, nl=False)
-        else:
+        elif stream:
             click.echo(render_text(report, context=context))
     except (SourceError, ValueError, OSError) as error:
         if jsonl_started:
             # iter_jsonl owns its partial-stream error footer. A second header
             # or footer here would corrupt the machine record sequence.
             ctx.exit(2)
-        _report_failure(ctx, error, jsonl=output_format == 'jsonl' and not output_dir)
+        _report_failure(ctx, error, jsonl=output_format == 'jsonl' and stream)
     ctx.exit(report.exit_code)
 
 

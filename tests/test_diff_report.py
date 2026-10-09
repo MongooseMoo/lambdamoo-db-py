@@ -165,6 +165,22 @@ def test_repreparation_restores_complete_events_before_new_limits():
     assert len(complete.events) == 2 and complete.footer['details_complete']
 
 
+@pytest.mark.parametrize('limit', [0, 1, 2, 5])
+def test_relimiting_a_prepared_report_equals_preparing_with_that_limit(limit):
+    class Policy:
+        def apply(self, comp, strict=False):
+            comp.events = [event(n, old='opaque', new='opaque', kind=kind) for n, kind in ((3, 'added'), (1, 'changed'), (2, 'changed'))]
+            comp.header['redaction'] = {'policy_sha256': 'c' * 64}
+            comp.footer['redacted_events'] = 3
+            return comp
+    raw = comparison([event(old='secret', new='secret1'), event(2), event(3)])
+    direct = prepare_report(raw, kinds=['changed'], max_events=limit, redaction=Policy())
+    relimited = prepare_report(prepare_report(raw, kinds=['changed'], redaction=Policy()), kinds=['changed'], max_events=limit)
+    assert (relimited.header, relimited.events, relimited.footer) == (direct.header, direct.events, direct.footer)
+    assert render_text(relimited) == render_text(direct)
+    assert list(iter_jsonl(relimited)) == list(iter_jsonl(direct))
+
+
 def test_bundle_refuses_nonatomic_destination_race(tmp_path, monkeypatch):
     import lambdamoo_db.diff_report as report
     root = tmp_path / 'report'
