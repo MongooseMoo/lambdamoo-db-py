@@ -334,7 +334,7 @@ class AddedVerbLine(GrepHit):
 
 
 def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str] | None = None,
-                     objs: list[MooObject] | None = None) -> Iterator[AddedVerbLine]:
+                     objs: list[MooObject] | None = None, invert: bool = False) -> Iterator[AddedVerbLine]:
     """Yield every verb code line in new that old's version of the same verb does not have.
 
     Verbs pair by object number, exact names, argument spec and occurrence
@@ -342,7 +342,8 @@ def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str
     insertions and replacements are reported with their original text.
     Moved lines can appear as additions. A verb or object that
     is not in old has every line reported. With pattern, only added lines
-    matching it are yielded. With objs (objects of new), only their verbs.
+    matching it are yielded, or with invert only those that do not match.
+    With objs (objects of new), only their verbs.
     """
     if objs is None:
         before_objects = old.objects_with_programs() if isinstance(old, LazyDatabase) else all_objects(old)
@@ -365,7 +366,7 @@ def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str
                 if tag not in ("insert", "replace"):
                     continue
                 for n in range(j1, j2):
-                    if pattern is None or pattern.search(v.code[n]):
+                    if pattern is None or bool(pattern.search(v.code[n])) != invert:
                         yield AddedVerbLine(o, idx, v, n + 1, v.code[n], key not in old_verbs)
 
 

@@ -371,6 +371,8 @@ def test_added_verb_lines_can_be_limited_to_objects():
     chosen = [new.objects[4], new.objects[1], new.objects[4]]
     assert [h.obj.id for h in added_verb_lines(old, new, objs=chosen)] == [1, 4]
     assert [h.obj.id for h in added_verb_lines(old, new, re.compile("nothing"), chosen)] == []
+    assert [h.obj.id for h in added_verb_lines(old, new, re.compile("nothing"), chosen, invert=True)] == [1, 4]
+    assert [h.line for h in added_verb_lines(old, new, re.compile("magic"), [new.objects[3]], invert=True)] == ["a();"]
 
 
 def test_object_continuity_tells_a_reused_number_from_the_same_object():
@@ -402,6 +404,12 @@ def test_cli_added_existing_and_obj(monkeypatch, tmp_path):
         return r.output.splitlines()
 
     assert added("-l")[-1] == "4 added lines in 4 verbs"
+    # --verb uses MOO name matching; -v keeps the added lines PATTERN does not match.
+    assert added("--verb", "say", "-o", "#1") == ["#1:[0] say:2: $magic:hook();", "1 added lines in 1 verbs"]
+    assert added("--verb", "shout") == ["0 added lines in 0 verbs"]
+    assert added("-v", "-o", "#3") == ["#3:[0] say:1: a();  (new verb)", "1 added lines in 1 verbs"]
+    r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "added", "-v", str(old_path)])
+    assert r.exit_code == 2 and "-v needs a PATTERN" in r.output
     assert added("--existing") == [
         "#1:[0] say:2: $magic:hook();",
         "#4:[0] say:2: $magic:hook();",

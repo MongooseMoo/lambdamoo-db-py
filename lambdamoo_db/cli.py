@@ -371,20 +371,26 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
 @click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
 @click.option("-l", "--verbs-only", is_flag=True, help="Print each verb once, with its count of added lines.")
 @click.option("-o", "--obj", "objs", multiple=True, help="Only these objects (repeatable).")
+@click.option("--verb", "verb_names", multiple=True, metavar="NAME",
+              help="Only verbs NAME would call, by MOO name matching (repeatable).")
+@click.option("-v", "--invert-match", is_flag=True, help="Only added lines that do NOT match PATTERN.")
 @click.option("--existing", is_flag=True,
               help="Only objects OLD already had: leaves out new numbers, and numbers recycled and reused since.")
 @click.option("--identity", default="creation_time", show_default=True, metavar="PROP",
               help="The property --existing compares to tell a reused number from the same object.")
 @click.pass_context
 def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, fixed_strings: bool, verbs_only: bool,
-          objs: tuple[str, ...], existing: bool, identity: str) -> None:
+          objs: tuple[str, ...], verb_names: tuple[str, ...], invert_match: bool, existing: bool,
+          identity: str) -> None:
     """Verb code lines this dump has that the OLD dump's same verb does not: #OBJ:[index] name:LINE: text.
 
-    With PATTERN (Python regex), only added lines matching it. A verb that
-    OLD does not have is marked "new verb". --existing answers "what did this
-    work add to objects it did not create"; a second summary line counts the
-    objects it left out.
+    With PATTERN (Python regex), only added lines matching it, or with -v
+    only those that do not. A verb that OLD does not have is marked "new
+    verb". --existing answers "what did this work add to objects it did not
+    create"; a second summary line counts the objects it left out.
     """
+    if invert_match and pattern is None:
+        raise click.UsageError("-v needs a PATTERN")
     rx = None
     if pattern is not None:
         try:
@@ -397,9 +403,12 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
     selected = [_object(db, r) for r in objs] or None
     lines = verbs = 0
     continuity: dict[int, str] = {}
-    for _, group in groupby(added_verb_lines(old_db, db, rx, selected), key=lambda h: (h.obj.id, h.index)):
+    found = added_verb_lines(old_db, db, rx, selected, invert=invert_match)
+    for _, group in groupby(found, key=lambda h: (h.obj.id, h.index)):
         hits = list(group)
         o, idx, v = hits[0].obj, hits[0].index, hits[0].verb
+        if verb_names and not any(verbcasecmp(v.name, name) for name in verb_names):
+            continue
         if existing:
             if o.id not in continuity:
                 continuity[o.id] = object_continuity(old_db, db, o.id, identity)
