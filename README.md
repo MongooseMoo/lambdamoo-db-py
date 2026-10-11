@@ -123,6 +123,7 @@ moodb --db new.db added old.db 'notify\('
 moodb --db new.db added -l -F old.db 'E_INVARG'
 moodb --db new.db added -l --existing old.db 'hp_'
 moodb --db new.db added -o '$room' -o '#410' old.db
+moodb --db new.db added -o '$room' --verb say --verb enterfunc -v old.db 'hp_'
 ```
 
 `added` pairs verbs by object number, exact names and argument specification,
@@ -141,6 +142,10 @@ summary count only matching added lines; identical dumps print
 or a full parse with `--no-cache`.
 
 `-o REF` (repeatable) limits the comparison to those objects of the new dump.
+`--verb NAME` (repeatable) keeps only verbs that NAME would call, by MOO name
+matching, so `--verb get` finds a verb named `g*et take`. `-v` inverts PATTERN:
+only added lines that do not match it. The last example asks what else changed
+in two verbs besides one piece of work's own lines.
 
 `--existing` answers "what did this work add to objects it did not create". It
 leaves out an object whose number the old dump lacks, and one whose number was
