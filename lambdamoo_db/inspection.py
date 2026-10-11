@@ -399,6 +399,44 @@ def own_properties(obj: MooObject) -> list[Property]:
     return obj.properties[: obj.propdefs_count]
 
 
+@attrs.frozen
+class AddedProperty:
+    obj: MooObject  # the object of new that defines it
+    prop: Property
+
+
+def added_property_definitions(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str] | None = None,
+                               objs: list[MooObject] | None = None, invert: bool = False) -> Iterator[AddedProperty]:
+    """Yield every property new defines on an object that old's object of the same number does not define.
+
+    Objects pair by number and definitions by name, ignoring letter case as
+    the server does. An object that is not in old has every definition
+    reported. Removed definitions and changed values, owners and permissions
+    are not reported. With pattern, only names matching it are yielded, or
+    with invert only those that do not match. With objs (objects of new),
+    only their definitions.
+
+    Without objs every object of both dumps is read: an offset index says
+    where an object's record is, not whether it defines properties.
+    """
+    if objs is None:
+        after_objects = all_objects(new)
+        list(all_objects(old))  # one pass over old, not one read for each object of new
+    else:
+        after_objects = iter(sorted({o.id: o for o in objs}.values(), key=lambda o: o.id))
+    for o in after_objects:
+        defined = own_properties(o)
+        if not defined:
+            continue
+        before = old.objects.get(o.id)
+        had = {p.propertyName.lower() for p in own_properties(before)} if before is not None else set()
+        for p in defined:
+            if p.propertyName.lower() in had:
+                continue
+            if pattern is None or bool(pattern.search(p.propertyName)) != invert:
+                yield AddedProperty(o, p)
+
+
 # db.h BUILTIN_PROPERTIES; flag properties read as 0 or 1.
 _FLAG_PROPS = {"programmer": ObjectFlags.PROGRAMMER, "wizard": ObjectFlags.WIZARD, "r": ObjectFlags.READ,
                "w": ObjectFlags.WRITE, "f": ObjectFlags.FERTILE, "a": ObjectFlags.ANONYMOUS}
