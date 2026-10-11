@@ -121,6 +121,8 @@ are not necessarily corruption: multiple inheritance can share descendants.
 moodb --db new.db added old.db
 moodb --db new.db added old.db 'notify\('
 moodb --db new.db added -l -F old.db 'E_INVARG'
+moodb --db new.db added -l --existing old.db 'hp_'
+moodb --db new.db added -o '$room' -o '#410' old.db
 ```
 
 `added` pairs verbs by object number, exact names and argument specification,
@@ -137,6 +139,21 @@ changes are not reported. Filters and the
 summary count only matching added lines; identical dumps print
 `0 added lines in 0 verbs`. Both dumps use the offset index when available,
 or a full parse with `--no-cache`.
+
+`-o REF` (repeatable) limits the comparison to those objects of the new dump.
+
+`--existing` answers "what did this work add to objects it did not create". It
+leaves out an object whose number the old dump lacks, and one whose number was
+recycled and reused in between: both dumps have an object there, but its
+`creation_time` differs. Name another property with `--identity PROP` for a
+world that records creation differently. An object with no such property on
+either side is kept, since only its number says it is the same one; check
+those by hand. A second summary line counts all three, for objects that had
+matching lines, and names the ones kept on their number:
+
+```text
+--existing left out 20 objects OLD lacks and 54 reused numbers; kept 3 on number alone (no .creation_time to compare): #1641 #9657 #22617
+```
 
 ### Lookup rules
 

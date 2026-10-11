@@ -15,6 +15,7 @@ from lambdamoo_db.inspection import (
     find_verb,
     format_value,
     lookup_property,
+    object_continuity,
     property_value,
     resolve_object,
     split_ref,
@@ -349,6 +350,75 @@ def test_added_existing_unprogrammed_verb_is_not_new():
     old = _verb_db({1: [("empty", None)]})
     new = _verb_db({1: [("empty", ["return 1;"])]})
     assert [(h.line, h.is_new) for h in added_verb_lines(old, new)] == [("return 1;", False)]
+
+
+def _stamp(db: MooDatabase, times: dict[int, int], name: str = "creation_time") -> MooDatabase:
+    for num, when in times.items():
+        db.objects[num].properties = [Property(name, when, 0, 5)]
+        db.objects[num].propdefs_count = 1
+    return db
+
+
+def _continuity_dbs():
+    """#1 is one object in both dumps, #2 a number recycled and reused, #3 new, #4 unstamped."""
+    old = _stamp(_verb_db({1: [("say", ["a();"])], 2: [("say", ["a();"])], 4: [("say", ["a();"])]}), {1: 100, 2: 200})
+    new = _stamp(_verb_db({n: [("say", ["a();", "$magic:hook();"])] for n in (1, 2, 3, 4)}), {1: 100, 2: 999, 3: 999})
+    return old, new
+
+
+def test_added_verb_lines_can_be_limited_to_objects():
+    old, new = _continuity_dbs()
+    chosen = [new.objects[4], new.objects[1], new.objects[4]]
+    assert [h.obj.id for h in added_verb_lines(old, new, objs=chosen)] == [1, 4]
+    assert [h.obj.id for h in added_verb_lines(old, new, re.compile("nothing"), chosen)] == []
+
+
+def test_object_continuity_tells_a_reused_number_from_the_same_object():
+    old, new = _continuity_dbs()
+    assert [object_continuity(old, new, n) for n in (1, 2, 3, 4)] == ["same", "reused", "absent", "unproven"]
+    # The identity property is the caller's choice; one neither dump defines proves nothing.
+    assert object_continuity(old, new, 2, "born") == "unproven"
+    born = _stamp(_verb_db({1: []}), {1: 5}, "born"), _stamp(_verb_db({1: []}), {1: 6}, "born")
+    assert object_continuity(*born, 1, "born") == "reused"
+    # A slot that is clear all the way up holds no value to compare.
+    clear = _stamp(_verb_db({1: []}), {1: CLEAR}), _stamp(_verb_db({1: []}), {1: CLEAR})
+    assert object_continuity(*clear, 1) == "unproven"
+
+
+def test_cli_added_existing_and_obj(monkeypatch, tmp_path):
+    import lambdamoo_db.cli as cli
+
+    old, new = _continuity_dbs()
+    for database in (old, new):
+        database.objects[0] = MooObject(0, "system", 0, 0, -1, [])
+    old_path = tmp_path / "old.db"
+    old_path.write_text("")
+    monkeypatch.setattr(cli, "open_indexed", lambda path, *_: old if Path(path) == old_path else new)
+    monkeypatch.setattr(cli, "load", lambda path: old if Path(path) == old_path else new)
+
+    def added(*args):
+        r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "added", *args, str(old_path), "magic"])
+        assert r.exit_code == 0, r.output
+        return r.output.splitlines()
+
+    assert added("-l")[-1] == "4 added lines in 4 verbs"
+    assert added("--existing") == [
+        "#1:[0] say:2: $magic:hook();",
+        "#4:[0] say:2: $magic:hook();",
+        "2 added lines in 2 verbs",
+        "--existing left out 1 objects OLD lacks and 1 reused numbers; kept 1 on number alone (no .creation_time to compare): #4",
+    ]
+    # With no such property nothing can be called reused: only the new number goes.
+    assert added("--existing", "--identity", "born")[-2:] == [
+        "3 added lines in 3 verbs",
+        "--existing left out 1 objects OLD lacks and 0 reused numbers; kept 3 on number alone (no .born to compare): #1 #2 #4",
+    ]
+    assert added("-o", "#2", "-o", "#3") == [
+        "#2:[0] say:2: $magic:hook();",
+        "#3:[0] say:2: $magic:hook();  (new verb)",
+        "2 added lines in 2 verbs",
+    ]
+    assert added("-o", "#2", "-o", "#3", "--existing")[0] == "0 added lines in 0 verbs"
 
 
 def test_cli_code_prop_grep_find_obj():
