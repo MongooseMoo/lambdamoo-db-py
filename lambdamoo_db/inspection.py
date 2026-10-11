@@ -333,7 +333,8 @@ class AddedVerbLine(GrepHit):
     is_new: bool
 
 
-def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str] | None = None) -> Iterator[AddedVerbLine]:
+def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str] | None = None,
+                     objs: list[MooObject] | None = None) -> Iterator[AddedVerbLine]:
     """Yield every verb code line in new that old's version of the same verb does not have.
 
     Verbs pair by object number, exact names, argument spec and occurrence
@@ -341,11 +342,15 @@ def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str
     insertions and replacements are reported with their original text.
     Moved lines can appear as additions. A verb or object that
     is not in old has every line reported. With pattern, only added lines
-    matching it are yielded.
+    matching it are yielded. With objs (objects of new), only their verbs.
     """
-    before_objects = old.objects_with_programs() if isinstance(old, LazyDatabase) else all_objects(old)
-    old_by_id = {o.id: o for o in before_objects}
-    after_objects = new.objects_with_programs() if isinstance(new, LazyDatabase) else all_objects(new)
+    if objs is None:
+        before_objects = old.objects_with_programs() if isinstance(old, LazyDatabase) else all_objects(old)
+        old_by_id = {o.id: o for o in before_objects}
+        after_objects = new.objects_with_programs() if isinstance(new, LazyDatabase) else all_objects(new)
+    else:
+        old_by_id = {}
+        after_objects = sorted({o.id: o for o in objs}.values(), key=lambda o: o.id)
     for o in after_objects:
         before = old_by_id.get(o.id)
         if before is None:
@@ -362,6 +367,27 @@ def added_verb_lines(old: MooDatabase, new: MooDatabase, pattern: re.Pattern[str
                 for n in range(j1, j2):
                     if pattern is None or pattern.search(v.code[n]):
                         yield AddedVerbLine(o, idx, v, n + 1, v.code[n], key not in old_verbs)
+
+
+def object_continuity(old: MooDatabase, new: MooDatabase, num: int, identity: str = "creation_time") -> str:
+    """How #num in new relates to #num in old: "absent", "reused", "same" or "unproven".
+
+    "absent": old has no object with that number. "reused": both have one and
+    their identity property differs, so the number was recycled and given to
+    another object in between. "same": the identity property is equal.
+    "unproven": either side lacks the property or holds no value for it, so
+    only the number says they are one object.
+    """
+    before, after = old.objects.get(num), new.objects[num]
+    if before is None:
+        return "absent"
+    try:
+        was, now = lookup_property(old, before, identity).value, lookup_property(new, after, identity).value
+    except LookupFailed:
+        return "unproven"
+    if was is CLEAR or now is CLEAR:
+        return "unproven"
+    return "same" if was == now else "reused"
 
 
 # --------------------------------------------------------------------------

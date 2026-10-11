@@ -3,6 +3,7 @@ import os
 import re
 import shlex
 import sys
+from collections import Counter
 from itertools import groupby
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from .inspection import (
     label,
     lookup_property,
     moo_string,
+    object_continuity,
     object_flags,
     own_properties,
     property_perms,
@@ -368,12 +370,20 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
 @click.option("-i", "--ignore-case", is_flag=True)
 @click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
 @click.option("-l", "--verbs-only", is_flag=True, help="Print each verb once, with its count of added lines.")
+@click.option("-o", "--obj", "objs", multiple=True, help="Only these objects (repeatable).")
+@click.option("--existing", is_flag=True,
+              help="Only objects OLD already had: leaves out new numbers, and numbers recycled and reused since.")
+@click.option("--identity", default="creation_time", show_default=True, metavar="PROP",
+              help="The property --existing compares to tell a reused number from the same object.")
 @click.pass_context
-def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, fixed_strings: bool, verbs_only: bool) -> None:
+def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, fixed_strings: bool, verbs_only: bool,
+          objs: tuple[str, ...], existing: bool, identity: str) -> None:
     """Verb code lines this dump has that the OLD dump's same verb does not: #OBJ:[index] name:LINE: text.
 
     With PATTERN (Python regex), only added lines matching it. A verb that
-    OLD does not have is marked "new verb".
+    OLD does not have is marked "new verb". --existing answers "what did this
+    work add to objects it did not create"; a second summary line counts the
+    objects it left out.
     """
     rx = None
     if pattern is not None:
@@ -384,10 +394,17 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
     db, names = _db(ctx)
     cache = ctx.obj["cache"]
     old_db = load(old) if cache is None else open_indexed(old, cache)
+    selected = [_object(db, r) for r in objs] or None
     lines = verbs = 0
-    for _, group in groupby(added_verb_lines(old_db, db, rx), key=lambda h: (h.obj.id, h.index)):
+    continuity: dict[int, str] = {}
+    for _, group in groupby(added_verb_lines(old_db, db, rx, selected), key=lambda h: (h.obj.id, h.index)):
         hits = list(group)
         o, idx, v = hits[0].obj, hits[0].index, hits[0].verb
+        if existing:
+            if o.id not in continuity:
+                continuity[o.id] = object_continuity(old_db, db, o.id, identity)
+            if continuity[o.id] in ("absent", "reused"):
+                continue
         lines += len(hits)
         verbs += 1
         new = "  (new verb)" if hits[0].is_new else ""
@@ -397,6 +414,12 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
         for h in hits:
             click.echo(f"#{o.id}:[{idx}] {_alias(v)}:{h.lineno}: {h.line}{new}")
     click.echo(f"{lines} added lines in {verbs} verbs")
+    if existing:
+        count = Counter(continuity.values())
+        unproven = [f"#{num}" for num, state in continuity.items() if state == "unproven"]
+        which = f": {' '.join(unproven[:20])}{' ...' if len(unproven) > 20 else ''}" if unproven else ""
+        click.echo(f"--existing left out {count['absent']} objects OLD lacks and {count['reused']} reused numbers; "
+                   f"kept {count['unproven']} on number alone (no .{identity} to compare){which}")
 
 
 @moodb.command()
