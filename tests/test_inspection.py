@@ -20,6 +20,7 @@ from lambdamoo_db.inspection import (
     property_value,
     resolve_object,
     split_ref,
+    value_holders,
     verb_args,
     verb_perms,
     verbcasecmp,
@@ -472,6 +473,23 @@ def test_added_property_definitions_reports_only_what_the_old_object_lacks():
     assert list(added_property_definitions(new, new)) == []
 
 
+def test_value_holders_counts_slots_that_are_not_clear():
+    db = MooDatabase()
+    for num, parents, children in ((1, [], [2, 4]), (2, [1], [3]), (3, [2], []), (4, [1], [])):
+        db.objects[num] = MooObject(num, f"obj{num}", 0, 2, -1, parents)
+        db.objects[num].children = children
+    _define(db, 1, ("first", 1), ("mana", 5))
+    # A descendant's slots follow its own definitions, so mana is not at the same index on #2 and #3.
+    _define(db, 2, ("extra", 1))
+    db.objects[2].properties += [Property("", CLEAR, 2, 5), Property("", CLEAR, 2, 5)]
+    db.objects[3].properties = [Property("", CLEAR, 2, 5), Property("", 7, 2, 5), Property("", 0, 2, 5)]
+    db.objects[4].properties = [Property("", 9, 2, 5), Property("", CLEAR, 2, 5)]
+    # mana: #1 defines it and #3 holds 0, which is a value; #2 and #4 are clear.
+    assert value_holders(db, db.objects[1], "mana") == (2, 4)
+    assert value_holders(db, db.objects[1], "first") == (3, 4)
+    assert value_holders(db, db.objects[2], "EXTRA") == (1, 2)
+
+
 def test_cli_added_props(monkeypatch, tmp_path):
     import lambdamoo_db.cli as cli
 
@@ -511,6 +529,9 @@ def test_cli_added_props(monkeypatch, tmp_path):
     ]
     assert added_props("-o", "$thing", "-o", "#3") == [everything[0], everything[4],
                                                        "2 added property definitions on 2 objects"]
+    # The fixture objects have no descendants: each definer is the one holder.
+    assert added_props("--holders", "-o", "#3") == [everything[4] + "  value held by 1 of 1",
+                                                    "1 added property definitions on 1 objects"]
     # The reused #2 and the new #3 are not objects OLD had.
     assert added_props("--existing") == [
         everything[0],

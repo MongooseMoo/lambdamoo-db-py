@@ -182,7 +182,10 @@ and `values` read those):
 
 PATTERN is a Python regex on the property name, with `-i`, `-F` and `-v` as on
 `added`. `-o REF` (repeatable) limits the comparison to those objects of the
-new dump. `-c` prints one line per object with its count. `--existing` and
+new dump. `-c` prints one line per object with its count. `--holders` ends
+each definition's line with `value held by N of M`: of the M objects that are
+the definer or a descendant of it, N have a value of their own (a slot that is
+not clear); the definer is always one of them. `--existing` and
 `--identity PROP` mean what they mean on `added`, with the same second summary
 line: an object the old dump lacks has every definition reported, and
 `--existing` leaves it out, along with reused numbers. Removed definitions and

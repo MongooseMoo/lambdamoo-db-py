@@ -37,6 +37,7 @@ from .inspection import (
     split_ref,
     tasks as list_tasks,
     tree_summary,
+    value_holders,
     verb_summary,
     verbcasecmp,
 )
@@ -451,6 +452,8 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
 @click.option("-i", "--ignore-case", is_flag=True)
 @click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
 @click.option("-c", "--count", is_flag=True, help="Print each object once, with its count of added definitions.")
+@click.option("--holders", is_flag=True,
+              help="After each definition, how many of the object and its descendants hold a value that is not clear.")
 @click.option("-o", "--obj", "objs", multiple=True, help="Only these objects (repeatable).")
 @click.option("-v", "--invert-match", is_flag=True, help="Only added definitions whose name does NOT match PATTERN.")
 @click.option("--existing", is_flag=True,
@@ -459,7 +462,8 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
               help="The property --existing compares to tell a reused number from the same object.")
 @click.pass_context
 def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, fixed_strings: bool,
-                count: bool, objs: tuple[str, ...], invert_match: bool, existing: bool, identity: str) -> None:
+                count: bool, holders: bool, objs: tuple[str, ...], invert_match: bool, existing: bool,
+                identity: str) -> None:
     """Property definitions this dump has that the OLD dump's same object does not: #OBJ.name  perms  owner.
 
     A definition is a property the object itself defines, not one it
@@ -488,7 +492,8 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
             click.echo(f"{len(hits):4d}  {where}")
             continue
         for h in hits:
-            click.echo(f"{where}.{h.prop.propertyName}  {property_perms(h.prop)}  owner #{int(h.prop.owner)}")
+            held = "  value held by {} of {}".format(*value_holders(db, h.obj, h.prop.propertyName)) if holders else ""
+            click.echo(f"{where}.{h.prop.propertyName}  {property_perms(h.prop)}  owner #{int(h.prop.owner)}{held}")
     click.echo(f"{definitions} added property definitions on {objects} objects")
     if existing:
         _echo_existing_summary(continuity, identity)

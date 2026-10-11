@@ -8,7 +8,9 @@
 
 - Rebased on `mongoosemoo/main` (`7cac94e`) on 2026-10-11.
 - `added_property_definitions` in `lambdamoo_db/inspection.py`, command `added-props` in `lambdamoo_db/cli.py`, README section "Comparing property definitions", tests in `tests/test_inspection.py`.
-- `uv run pytest -q`: 891 passed, 8 skipped (2026-10-11).
+- `--holders` ends each definition's line with `value held by N of M` (the definer and its descendants whose slot is not clear); `value_holders` in `inspection.py`.
+- PR: MongooseMoo/lambdamoo-db-py#15, open, not merged.
+- `uv run pytest -q`: 892 passed, 8 skipped (2026-10-11).
 - Ran on the hub dumps `mongoose.db.new.2026-10-11T2238` against `…T0352` with `--existing`; the report is `C:\Users\Q\projects\mongoose\reports\hp-added-props.md` (the hub is not a git repository).
 
 ## Decisions and why
@@ -17,6 +19,8 @@
 - The per-object count option is `-c/--count`, as the assignment says, where `added` uses `-l/--verbs-only` for its per-verb count.
 - `added` and `added-props` share `_added_pattern`, `_left_out` and `_echo_existing_summary` in `cli.py` so `--existing` means one thing.
 - Without `-o`, both dumps are parsed whole: the offset index records where objects and verb programs are, not which objects define properties.
+
+- `--holders` was added because the assignment asked for the number of objects holding a non-clear value "with `moodb values`", and `values` cannot give it: it searches stored strings by regex and has no notion of a property name or of a clear slot. The count went into the tool, as the hub's rule 10 asks.
 
 ## Surprises
 
