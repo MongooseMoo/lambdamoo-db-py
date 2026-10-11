@@ -492,6 +492,14 @@ def test_cli_props_name_and_descendants(db):
                     expected.add((o.id, name))
     assert seen == expected and len(expected) > 2
 
+    # --group: one line per distinct name and value, counting the objects that hold it.
+    r = run("props", "1", "-r", "--name", "key", "--group")
+    assert r.exit_code == 0
+    counts = [int(re.search(r"  x(\d+)  #", line)[1]) for line in r.output.splitlines()]
+    assert sum(counts) == len([e for e in expected if e[1] == "key"]) and counts == sorted(counts, reverse=True)
+    assert all(line.startswith(".key = ") for line in r.output.splitlines())
+    assert run("props", "1", "--group").exit_code == 2
+
 
 def test_cli_new_commands():
     r = run("info")
