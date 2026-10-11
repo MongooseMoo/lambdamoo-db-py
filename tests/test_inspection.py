@@ -453,6 +453,36 @@ def test_cli_code_prop_grep_find_obj():
     assert '  parents   #1 $root_class "Root Class"' in r.output
 
 
+def test_cli_find_several_texts_glob_and_count():
+    one = run("find", "--verb", "from_list").output.splitlines()
+    other = run("find", "--verb", "to_list").output.splitlines()
+    assert one and other
+
+    r = run("find", "--verb", "from_list", "to_list")
+    assert r.exit_code == 0, r.output
+    assert r.output.splitlines() == ["== from_list", *one, "== to_list", *other]
+
+    r = run("find", "--verb", "-c", "from_list", "to_list")
+    assert r.output.splitlines() == [f"{len(one):6d}  from_list", f"{len(other):6d}  to_list"]
+
+    r = run("find", "--verb", "--glob", "-c", "no_such_verb_anywhere")
+    assert r.output == "     0  no_such_verb_anywhere\n"
+
+    globbed = run("find", "--verb", "--glob", "FROM_l*").output.splitlines()
+    # A glob matches the names a verb has; a verb named "*" answers a call to from_list but has no such name.
+    assert {line for line in one if "from_list" in line} <= set(globbed)
+    assert globbed and all("from_l" in line.lower() for line in globbed)
+
+    r = run("find", "--prop", "--glob", "-c", "string_ut*")
+    assert r.output == "     1  string_ut*\n"
+
+    r = run("find", "-c", "string_utils")
+    assert r.output == "     1  string_utils\n"
+
+    r = run("find", "--glob", "string_utils")
+    assert r.exit_code == 2 and "--glob needs --verb or --prop" in r.output
+
+
 def test_cli_code_bare_ref_prints_every_verb():
     r = run("code", "$string_utils")
     assert r.exit_code == 0, r.output
