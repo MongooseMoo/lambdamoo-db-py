@@ -11,6 +11,7 @@ import click
 from .inspection import (
     BUILTIN_PROPS,
     LookupFailed,
+    added_property_definitions,
     added_verb_lines,
     all_objects,
     all_properties,
@@ -36,6 +37,7 @@ from .inspection import (
     split_ref,
     tasks as list_tasks,
     tree_summary,
+    value_holders,
     verb_summary,
     verbcasecmp,
 )
@@ -168,6 +170,33 @@ def _object(db, ref: str):
 def _alias(verb) -> str:
     """The first name of a verb, for one-line output."""
     return (verb.name.split() or [""])[0]
+
+
+def _added_pattern(pattern: str | None, ignore_case: bool, fixed_strings: bool, invert_match: bool) -> re.Pattern[str] | None:
+    """PATTERN of `added` and `added-props`, compiled with their -i, -F and -v options."""
+    if invert_match and pattern is None:
+        raise click.UsageError("-v needs a PATTERN")
+    if pattern is None:
+        return None
+    try:
+        return re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if ignore_case else 0)
+    except re.error as e:
+        raise click.BadParameter(str(e), param_hint="PATTERN")
+
+
+def _left_out(continuity: dict[int, str], old_db, db, num: int, identity: str) -> bool:
+    """Does --existing leave object #num out? Its continuity is worked out once and kept for the summary."""
+    if num not in continuity:
+        continuity[num] = object_continuity(old_db, db, num, identity)
+    return continuity[num] in ("absent", "reused")
+
+
+def _echo_existing_summary(continuity: dict[int, str], identity: str) -> None:
+    count = Counter(continuity.values())
+    unproven = [f"#{num}" for num, state in continuity.items() if state == "unproven"]
+    which = f": {' '.join(unproven[:20])}{' ...' if len(unproven) > 20 else ''}" if unproven else ""
+    click.echo(f"--existing left out {count['absent']} objects OLD lacks and {count['reused']} reused numbers; "
+               f"kept {count['unproven']} on number alone (no .{identity} to compare){which}")
 
 
 @moodb.command()
@@ -389,14 +418,7 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
     verb". --existing answers "what did this work add to objects it did not
     create"; a second summary line counts the objects it left out.
     """
-    if invert_match and pattern is None:
-        raise click.UsageError("-v needs a PATTERN")
-    rx = None
-    if pattern is not None:
-        try:
-            rx = re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if ignore_case else 0)
-        except re.error as e:
-            raise click.BadParameter(str(e), param_hint="PATTERN")
+    rx = _added_pattern(pattern, ignore_case, fixed_strings, invert_match)
     db, names = _db(ctx)
     cache = ctx.obj["cache"]
     old_db = load(old) if cache is None else open_indexed(old, cache)
@@ -409,11 +431,8 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
         o, idx, v = hits[0].obj, hits[0].index, hits[0].verb
         if verb_names and not any(verbcasecmp(v.name, name) for name in verb_names):
             continue
-        if existing:
-            if o.id not in continuity:
-                continuity[o.id] = object_continuity(old_db, db, o.id, identity)
-            if continuity[o.id] in ("absent", "reused"):
-                continue
+        if existing and _left_out(continuity, old_db, db, o.id, identity):
+            continue
         lines += len(hits)
         verbs += 1
         new = "  (new verb)" if hits[0].is_new else ""
@@ -424,11 +443,60 @@ def added(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, 
             click.echo(f"#{o.id}:[{idx}] {_alias(v)}:{h.lineno}: {h.line}{new}")
     click.echo(f"{lines} added lines in {verbs} verbs")
     if existing:
-        count = Counter(continuity.values())
-        unproven = [f"#{num}" for num, state in continuity.items() if state == "unproven"]
-        which = f": {' '.join(unproven[:20])}{' ...' if len(unproven) > 20 else ''}" if unproven else ""
-        click.echo(f"--existing left out {count['absent']} objects OLD lacks and {count['reused']} reused numbers; "
-                   f"kept {count['unproven']} on number alone (no .{identity} to compare){which}")
+        _echo_existing_summary(continuity, identity)
+
+
+@moodb.command("added-props")
+@click.argument("old", type=click.Path(exists=True, dir_okay=False))
+@click.argument("pattern", required=False)
+@click.option("-i", "--ignore-case", is_flag=True)
+@click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
+@click.option("-c", "--count", is_flag=True, help="Print each object once, with its count of added definitions.")
+@click.option("--holders", is_flag=True,
+              help="After each definition, how many of the object and its descendants hold a value that is not clear.")
+@click.option("-o", "--obj", "objs", multiple=True, help="Only these objects (repeatable).")
+@click.option("-v", "--invert-match", is_flag=True, help="Only added definitions whose name does NOT match PATTERN.")
+@click.option("--existing", is_flag=True,
+              help="Only objects OLD already had: leaves out new numbers, and numbers recycled and reused since.")
+@click.option("--identity", default="creation_time", show_default=True, metavar="PROP",
+              help="The property --existing compares to tell a reused number from the same object.")
+@click.pass_context
+def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: bool, fixed_strings: bool,
+                count: bool, holders: bool, objs: tuple[str, ...], invert_match: bool, existing: bool,
+                identity: str) -> None:
+    """Property definitions this dump has that the OLD dump's same object does not: #OBJ.name  perms  owner.
+
+    A definition is a property the object itself defines, not one it
+    inherits. Names compare without regard to letter case. With PATTERN
+    (Python regex on the property name), only definitions matching it, or
+    with -v only those that do not. --existing answers "which properties did
+    this work define on objects it did not create"; a second summary line
+    counts the objects it left out.
+    """
+    rx = _added_pattern(pattern, ignore_case, fixed_strings, invert_match)
+    db, names = _db(ctx)
+    cache = ctx.obj["cache"]
+    old_db = load(old) if cache is None else open_indexed(old, cache)
+    selected = [_object(db, r) for r in objs] or None
+    definitions = objects = 0
+    continuity: dict[int, str] = {}
+    found = added_property_definitions(old_db, db, rx, selected, invert=invert_match)
+    for num, group in groupby(found, key=lambda h: h.obj.id):
+        if existing and _left_out(continuity, old_db, db, num, identity):
+            continue
+        hits = list(group)
+        definitions += len(hits)
+        objects += 1
+        where = label(db, num, names)
+        if count:
+            click.echo(f"{len(hits):4d}  {where}")
+            continue
+        for h in hits:
+            held = "  value held by {} of {}".format(*value_holders(db, h.obj, h.prop.propertyName)) if holders else ""
+            click.echo(f"{where}.{h.prop.propertyName}  {property_perms(h.prop)}  owner #{int(h.prop.owner)}{held}")
+    click.echo(f"{definitions} added property definitions on {objects} objects")
+    if existing:
+        _echo_existing_summary(continuity, identity)
 
 
 @moodb.command()

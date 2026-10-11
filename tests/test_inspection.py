@@ -9,6 +9,7 @@ from lambdamoo_db.cli import moodb
 from lambdamoo_db.database import CLEAR, MooDatabase, MooError, MooObject, ObjNum, Property, Verb
 from lambdamoo_db.inspection import (
     LookupFailed,
+    added_property_definitions,
     added_verb_lines,
     all_properties,
     find_slot,
@@ -19,6 +20,7 @@ from lambdamoo_db.inspection import (
     property_value,
     resolve_object,
     split_ref,
+    value_holders,
     verb_args,
     verb_perms,
     verbcasecmp,
@@ -427,6 +429,146 @@ def test_cli_added_existing_and_obj(monkeypatch, tmp_path):
         "2 added lines in 2 verbs",
     ]
     assert added("-o", "#2", "-o", "#3", "--existing")[0] == "0 added lines in 0 verbs"
+
+
+def _define(db: MooDatabase, num: int, *props: tuple[str, object]) -> MooDatabase:
+    """Add property definitions to #num, after any it has; inherited slots are not modelled."""
+    o = db.objects[num]
+    o.properties = o.properties[: o.propdefs_count] + [Property(name, value, 2, 5) for name, value in props]
+    o.propdefs_count = len(o.properties)
+    return db
+
+
+def _property_dbs():
+    """_continuity_dbs() with definitions added: #1 same object, #2 reused number, #3 new, #4 unstamped."""
+    old, new = _continuity_dbs()
+    _define(old, 1, ("Color", "red"), ("gone", 1))
+    _define(old, 4, ("weight", 3))
+    _define(new, 1, ("color", "red"), ("hp_generation", 0), ("mana", [1, 2]))
+    _define(new, 2, ("hp_max", 10))
+    _define(new, 3, ("hp_max", 20))
+    _define(new, 4, ("weight", 4), ("hp_regen", "x"))
+    return old, new
+
+
+def test_added_property_definitions_reports_only_what_the_old_object_lacks():
+    old, new = _property_dbs()
+    found = [(h.obj.id, h.prop.propertyName) for h in added_property_definitions(old, new)]
+    # #1 kept creation_time, lost "gone", and "Color" became "color": none of that is an addition.
+    # #2 has an object in both dumps, so its changed creation_time value is not a new definition.
+    # #3 is not in old, so everything it defines is reported. #4's changed value of weight is not.
+    assert found == [(1, "hp_generation"), (1, "mana"), (2, "hp_max"), (3, "creation_time"), (3, "hp_max"), (4, "hp_regen")]
+
+    hp = re.compile("^hp_")
+    assert [(h.obj.id, h.prop.propertyName) for h in added_property_definitions(old, new, hp)] == [
+        (1, "hp_generation"), (2, "hp_max"), (3, "hp_max"), (4, "hp_regen"),
+    ]
+    assert [(h.obj.id, h.prop.propertyName) for h in added_property_definitions(old, new, hp, invert=True)] == [
+        (1, "mana"), (3, "creation_time"),
+    ]
+    chosen = [new.objects[4], new.objects[1], new.objects[4]]
+    assert [(h.obj.id, h.prop.propertyName) for h in added_property_definitions(old, new, hp, chosen)] == [
+        (1, "hp_generation"), (4, "hp_regen"),
+    ]
+    assert list(added_property_definitions(new, new)) == []
+
+
+def test_value_holders_counts_slots_that_are_not_clear():
+    db = MooDatabase()
+    for num, parents, children in ((1, [], [2, 4]), (2, [1], [3]), (3, [2], []), (4, [1], [])):
+        db.objects[num] = MooObject(num, f"obj{num}", 0, 2, -1, parents)
+        db.objects[num].children = children
+    _define(db, 1, ("first", 1), ("mana", 5))
+    # A descendant's slots follow its own definitions, so mana is not at the same index on #2 and #3.
+    _define(db, 2, ("extra", 1))
+    db.objects[2].properties += [Property("", CLEAR, 2, 5), Property("", CLEAR, 2, 5)]
+    db.objects[3].properties = [Property("", CLEAR, 2, 5), Property("", 7, 2, 5), Property("", 0, 2, 5)]
+    db.objects[4].properties = [Property("", 9, 2, 5), Property("", CLEAR, 2, 5)]
+    # mana: #1 defines it and #3 holds 0, which is a value; #2 and #4 are clear.
+    assert value_holders(db, db.objects[1], "mana") == (2, 4)
+    assert value_holders(db, db.objects[1], "first") == (3, 4)
+    assert value_holders(db, db.objects[2], "EXTRA") == (1, 2)
+
+
+def test_cli_added_props(monkeypatch, tmp_path):
+    import lambdamoo_db.cli as cli
+
+    old, new = _property_dbs()
+    for database in (old, new):
+        database.objects[0] = MooObject(0, "system", 0, 0, -1, [])
+    _define(new, 0, ("thing", ObjNum(1)))
+    _define(old, 0, ("thing", ObjNum(1)))
+    old_path = tmp_path / "old.db"
+    old_path.write_text("")
+    monkeypatch.setattr(cli, "open_indexed", lambda path, *_: old if Path(path) == old_path else new)
+    monkeypatch.setattr(cli, "load", lambda path: old if Path(path) == old_path else new)
+
+    def added_props(*args, pattern=("hp_",), options=()):
+        r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), *options, "added-props", *args, str(old_path), *pattern])
+        assert r.exit_code == 0, r.output
+        return r.output.splitlines()
+
+    everything = [
+        '#1 $thing "obj1".hp_generation  rc  owner #2',
+        '#1 $thing "obj1".mana  rc  owner #2',
+        '#2 "obj2".hp_max  rc  owner #2',
+        '#3 "obj3".creation_time  rc  owner #0',
+        '#3 "obj3".hp_max  rc  owner #2',
+        '#4 "obj4".hp_regen  rc  owner #2',
+        "6 added property definitions on 4 objects",
+    ]
+    for options in ((), ("--no-cache",)):
+        assert added_props(pattern=(), options=options) == everything
+    assert added_props() == [everything[0], everything[2], everything[4], everything[5],
+                             "4 added property definitions on 4 objects"]
+    assert added_props("-v") == [everything[1], everything[3], "2 added property definitions on 2 objects"]
+    assert added_props("-i", "-F", pattern=("HP_G",)) == [everything[0], "1 added property definitions on 1 objects"]
+    assert added_props("-c", pattern=()) == [
+        '   2  #1 $thing "obj1"', '   1  #2 "obj2"', '   2  #3 "obj3"', '   1  #4 "obj4"',
+        "6 added property definitions on 4 objects",
+    ]
+    assert added_props("-o", "$thing", "-o", "#3") == [everything[0], everything[4],
+                                                       "2 added property definitions on 2 objects"]
+    # The fixture objects have no descendants: each definer is the one holder.
+    assert added_props("--holders", "-o", "#3") == [everything[4] + "  value held by 1 of 1",
+                                                    "1 added property definitions on 1 objects"]
+    # The reused #2 and the new #3 are not objects OLD had.
+    assert added_props("--existing") == [
+        everything[0],
+        everything[5],
+        "2 added property definitions on 2 objects",
+        "--existing left out 1 objects OLD lacks and 1 reused numbers; kept 1 on number alone (no .creation_time to compare): #4",
+    ]
+    assert added_props("--existing", "--identity", "born")[-2:] == [
+        "3 added property definitions on 3 objects",
+        "--existing left out 1 objects OLD lacks and 0 reused numbers; kept 3 on number alone (no .born to compare): #1 #2 #4",
+    ]
+    assert added_props("-o", "#2", "-o", "#3", "--existing")[0] == "0 added property definitions on 0 objects"
+
+    r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "added-props", "-v", str(old_path)])
+    assert r.exit_code == 2 and "-v needs a PATTERN" in r.output
+    r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "added-props", str(old_path), "("])
+    assert r.exit_code == 2 and "Invalid value for PATTERN" in r.output
+
+
+def test_added_props_reads_definitions_of_objects_without_verb_programs_through_the_index(tmp_path):
+    """The offset index lists programs per object, not definitions: an object with no verbs must still be found."""
+    from lambdamoo_db.lazy import LazyDatabase, open_indexed
+
+    open_indexed(TOASTCORE, tmp_path)  # the first opening writes the index and returns its full parse
+    lazy = open_indexed(TOASTCORE, tmp_path)
+    assert isinstance(lazy, LazyDatabase)
+    full = load(str(TOASTCORE))
+    bare = next(o for o in full.objects.values() if o.propdefs_count and not any(v.code for v in o.verbs))
+    assert bare.id not in {o.id for o in lazy.objects_with_programs()}
+    empty = MooDatabase()
+    expected = [(o.id, p.propertyName) for o in sorted(full.objects.values(), key=lambda o: o.id)
+                for p in o.properties[: o.propdefs_count]]
+    found = [(h.obj.id, h.prop.propertyName) for h in added_property_definitions(empty, lazy)]
+    assert found == expected
+    assert bare.id in {num for num, _ in found}
+    # As the old side too: every definition is found there, so nothing is new.
+    assert list(added_property_definitions(open_indexed(TOASTCORE, tmp_path), full)) == []
 
 
 def test_cli_code_prop_grep_find_obj():

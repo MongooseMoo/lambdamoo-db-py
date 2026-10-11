@@ -160,6 +160,42 @@ matching lines, and names the ones kept on their number:
 --existing left out 20 objects OLD lacks and 54 reused numbers; kept 3 on number alone (no .creation_time to compare): #1641 #9657 #22617
 ```
 
+### Comparing property definitions
+
+```sh
+moodb --db new.db added-props --existing old.db 'hp_'
+moodb --db new.db added-props -c -o '$root_class' -o '#410' old.db
+```
+
+`added-props` lists the properties the new dump defines on an object that the
+old dump's object of the same number does not define. A definition is a
+property the object itself defines, as `obj` lists under "own properties"; an
+inherited slot is not one. Names compare without regard to letter case, as the
+server compares them, so a property renamed only in case is not new. One line
+per definition, with its permissions and owner; values are not printed (`prop`
+and `values` read those):
+
+```text
+#1 $root_class "Root Class".hp_generation  rc  owner #2
+3 added property definitions on 2 objects
+```
+
+PATTERN is a Python regex on the property name, with `-i`, `-F` and `-v` as on
+`added`. `-o REF` (repeatable) limits the comparison to those objects of the
+new dump. `-c` prints one line per object with its count. `--holders` ends
+each definition's line with `value held by N of M`: of the M objects that are
+the definer or a descendant of it, N have a value of their own (a slot that is
+not clear); the definer is always one of them. `--existing` and
+`--identity PROP` mean what they mean on `added`, with the same second summary
+line: an object the old dump lacks has every definition reported, and
+`--existing` leaves it out, along with reused numbers. Removed definitions and
+changes to a value, owner or permissions are not reported; `moodb diff` has
+those.
+
+Without `-o`, both dumps are parsed whole even when they have an offset index:
+the index records where each object and verb program is, not which objects
+define properties. With `-o`, only those objects and their ancestors are read.
+
 ### Lookup rules
 
 Lookups follow ToastStunt rather than a simplified model:
