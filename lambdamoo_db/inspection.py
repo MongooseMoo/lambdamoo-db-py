@@ -491,6 +491,16 @@ def all_properties(db: MooDatabase, obj: MooObject) -> Iterator[PropertyHit]:
                 yield lookup_property(db, obj, p.propertyName)
 
 
+def stored_properties(db: MooDatabase, obj: MooObject) -> Iterator[tuple[str, Any]]:
+    """(name, value) for every property whose slot on obj holds a value of its own (not clear)."""
+    index = 0
+    for a in db.ancestors(obj):
+        for p in own_properties(a):
+            if index < len(obj.properties) and isinstance(p.propertyName, str) and obj.properties[index].value is not CLEAR:
+                yield p.propertyName, obj.properties[index].value
+            index += 1
+
+
 # --------------------------------------------------------------------------
 # References
 
