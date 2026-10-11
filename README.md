@@ -75,12 +75,45 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `find --prop NAME` | objects defining a property called NAME |
 | `refs REF` | property values holding the object, and verb code lines mentioning `#N` or its `$name` |
 | `values PATTERN [-i] [-F] [--in-waif REF]` | Python regex over every stored string: each object's own property values (anonymous objects included), through lists, map keys and values, and into waifs. Prints the path, e.g. `#4982.systems[10]<waif #4238>.sounds["engage"]<waif #3010>.snd = "..."`, with waif slots named and list indexes 1-based. `--in-waif` keeps only strings inside a waif of that class or a descendant |
-| `children REF [-r]`, `contents REF [-r]` | direct or recursive children / contents |
+| `children REF [-r]`, `contents REF [-r]` | direct or recursive children / contents; `--summary [--format json]` measures the whole reachable graph |
 | `players` | player objects and their flags |
 | `tasks [-v]` | queued, suspended and interrupted tasks: id, due time (UTC) and frame; `-v` shows the whole stack |
 | `batch [QUERY...]` | the answers to several of the commands above, in one run |
 
 Every command exits 1 with a message when a reference does not resolve.
+
+### Measuring contents and inheritance trees
+
+Use summaries to measure the work a recursive traversal would reach without
+printing thousands of object names or importing Python internals:
+
+```sh
+moodb --db world.db contents '#1261' --summary
+moodb --db world.db contents '#1226' --summary --format json
+moodb --db world.db children '$root_class' --summary --format json
+moodb --db world.db batch 'contents #1261 --summary' 'contents #1226 --summary'
+```
+
+`--summary` always traverses the complete reachable graph; `-r` is unnecessary.
+Text and JSON report the same fields. Summaries contain object numbers and
+counts, without object names or property values. `batch` reuses the loaded
+records, and prints a `=== QUERY` separator before each answer.
+
+| Field | Meaning |
+|---|---|
+| `root`, `relation` | resolved object number and `contents` or `children` |
+| `direct_count` | distinct existing objects directly linked from the root, excluding the root itself |
+| `descendant_count` | distinct existing reachable objects, excluding the root |
+| `leaf_count` | descendants with no stored references in this relation |
+| `max_depth` | greatest shortest-path distance from the root; zero for an empty graph |
+| `missing_reference_count` | stored edges pointing to objects absent from the dump |
+| `repeated_reference_count` | stored edges to an already discovered object, including duplicate entries, shared descendants and cycles |
+
+Traversal is iterative and visits each existing object once, even with cycles
+or multiple parents. Edge diagnostics cover the root and all visited objects.
+A node whose only references are missing is not a leaf. Repeated references
+are not necessarily corruption: multiple inheritance can share descendants.
+`--format json` requires `--summary`; ordinary listings retain their format.
 
 ### Comparing verb source
 

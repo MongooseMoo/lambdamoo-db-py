@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -115,6 +115,50 @@ def descendants(db: MooDatabase, obj: MooObject, field: str = "children") -> Ite
         for c in found:
             yield c
         stack.extend(reversed(found))
+
+
+def tree_summary(db: MooDatabase, obj: MooObject, field: str = "children") -> dict[str, int | str]:
+    """Count reachable objects without listing names or property values.
+
+    The root is excluded from object counts. Depth is the shortest distance
+    from the root, so shared descendants have a stable depth. Missing and
+    repeated references count stored edges across all visited objects; repeated
+    edges include duplicates, shared descendants and cycles, not just cycles.
+    A leaf is a descendant with no stored edges in the chosen relation.
+    """
+    if field not in ("children", "contents"):
+        raise ValueError(f"not a tree relation: {field!r}")
+    counts = {
+        "root": obj.id,
+        "relation": field,
+        "direct_count": 0,
+        "descendant_count": 0,
+        "leaf_count": 0,
+        "max_depth": 0,
+        "missing_reference_count": 0,
+        "repeated_reference_count": 0,
+    }
+    seen = {obj.id}
+    pending = deque([(obj, 0)])
+    while pending:
+        current, depth = pending.popleft()
+        links = getattr(current, field)
+        if depth and not links:
+            counts["leaf_count"] += 1
+        for ref in links:
+            number = int(ref)
+            if number not in db.objects:
+                counts["missing_reference_count"] += 1
+            elif number in seen:
+                counts["repeated_reference_count"] += 1
+            else:
+                seen.add(number)
+                if depth == 0:
+                    counts["direct_count"] += 1
+                counts["descendant_count"] += 1
+                counts["max_depth"] = max(counts["max_depth"], depth + 1)
+                pending.append((db.objects[number], depth + 1))
+    return counts
 
 
 def dollar_names(db: MooDatabase) -> dict[int, str]:
