@@ -17,6 +17,7 @@ Assignment from the hub's team lead, 2026-10-12:
 - After the change, same dump, index in a scratch `--cache-dir`: `find --verb sync_hum` 2.9 s (2.94, 2.86), with #155369's `":sync_hum"` as a sixth line; `find --prop` (same three names) 2.9 s; `grep -l ':sync_hum'` 3.4 s in the same session. `find --verb event_say forbid_get weave` and the `find --prop` run print exactly what they printed before.
 - First version of the fix opened the dump once per record and took 8.7 s; a profile showed 44,565 `open` calls costing about 4 s, so the scan now holds one handle (`LazyDatabase._scanning`).
 - `uv run pytest -q`: 912 passed, 8 skipped (2026-10-12).
+- PR: MongooseMoo/lambdamoo-db-py#17, open, not merged.
 - The change:
   - `Reader.read_propdef_names` split out of `readProperties` (`reader.py`).
   - `LazyDatabase.read_head`, `object_heads`, `defined_property_names` (`lazy.py`); `objects_with_programs` and `verb_changes.verb_holders` use `read_head`.
