@@ -283,6 +283,81 @@ from the same comparison; the `STATUS: bundle DIR` line then goes to standard
 error. Each keeps its own default limit and the bundle is written first, so a
 refused directory fails before any report is printed.
 
+### Reading the verb changes as source
+
+```sh
+moodb --db new.db diff old.db --plain --output-dir review-source
+moodb --db new.db diff old.db --plain --existing --output-dir review-existing
+moodb --db new.db diff old.db --plain -o '#1' -o '$room' --full
+moodb --db new.db diff old.db --plain --exclude '$test_runner' --context 8 --output-dir review-rest
+```
+
+`--plain` writes the verb changes to be read from top to bottom, by a person
+or an agent. Nothing is escaped, encoded or cut short, there is no JSON and
+there are no hashes: verb source appears as the MOO code it is, once.
+`--output-dir DIR` gets `index.txt` and one `objects/permanent-N.txt` per
+changed object, and must not exist yet; without it the same text goes to
+standard output, index first.
+
+Each verb starts with a header: `ADDED`, `CHANGED` or `REMOVED`, the object
+and the verb's first name, its 0-based position on the object (what
+`code REF:N` takes), then all its names, argument spec, permissions and owner.
+After the header:
+
+- an added verb has its complete source, with line numbers;
+- a removed verb has its complete old source, with line numbers;
+- a changed verb has one line for each thing that changed besides the source
+  (`names:`, `args:`, `perms:`, `owner:`, each as `OLD -> NEW`), then a
+  unified diff of its source lines. `--context N` sets the unchanged lines
+  around each change (default 3). `--full` shows the whole new verb instead,
+  numbered as the new dump has it, with `+` on added lines and `-` on removed
+  ones. A verb whose source is the same says `source unchanged`.
+
+```text
+========================================================================
+CHANGED  #1:moveto  [12]
+names "moveto"   args this none this   perms rxd   owner #2 "Wizard"
+source: +2 -1 lines
+========================================================================
+@@ -1,4 +1,5 @@
+ {where} = args;
+ if (!valid(where))
+-return E_INVARG;
++raise(E_INVARG);
++endif
+ return this:go(where);
+```
+
+Verbs pair as in `--view code`: by exact names, argument spec and occurrence
+among identical definitions, and their source lines compare exactly. Of the
+verbs that leaves unpaired on an object, an old and a new one with the same
+source are shown as one changed verb (a rename, or a new argument spec), and
+so are two with the same names; `--view code` reports each of those as one
+verb removed and one added. Anonymous objects are not compared.
+
+The `"Last modified ..."` line a verb ends with is part of its source and is
+compared like any other line, as `--view code` does, so a verb that was only
+saved again counts as changed. Its header then says `only the Last modified
+line changed`, and the index counts such verbs. When that line did not change
+and falls outside every hunk, the header quotes it.
+
+`-o REF` (repeatable) compares only those objects and `--exclude REF`
+(repeatable) leaves objects out. `--existing` keeps only objects the old dump
+already had, with the meaning it has on `added`: it leaves out a number the
+old dump lacks and a number recycled and reused in between, told apart by
+`--identity PROP` (default `creation_time`). An object the new dump no longer
+has was the old dump's, so it stays. `index.txt` names the options in force,
+then lists each object in number order with its counts of added, changed and
+removed verbs, marked `[new object]`, `[removed object]`, `[reused number]` or
+`[by number only]` where that applies, and then lists what `--exclude` and
+`--existing` left out, with the same counts, so several runs can be checked to
+cover everything between them.
+
+`--plain` reads both dumps through the offset index, as `added` does, and
+neither freezes nor hashes them. It cannot be combined with `--format`,
+`--section`, `--kind`, `--max-events`, `--stop-after` or `--redact`: nothing
+is redacted. It exits 0 when it wrote no verb change and 1 when it wrote any.
+
 ```sh
 moodb history --repo /path/to/mongoose_db --from OLD_SHA --to NEW_SHA --output-dir review-history
 moodb history --repo /path/to/mongoose_db --from OLD_SHA --to NEW_SHA --mode adjacent --output-dir review-timeline

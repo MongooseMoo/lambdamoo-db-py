@@ -690,22 +690,95 @@ def _report_failure(ctx, error, *, jsonl=False):
     ctx.exit(2)
 
 
+_PLAIN_ONLY = {'excluded': '--exclude', 'existing': '--existing', 'identity': '--identity', 'full': '--full'}
+_NOT_WITH_PLAIN = {'output_format': '--format', 'sections': '--section', 'kinds': '--kind', 'max_events': '--max-events',
+                   'stop_after': '--stop-after', 'redact': '--redact', 'redact_strict': '--redact-strict'}
+
+
+def _plain_diff(ctx, old_path, output_dir, references, excluded, existing, identity, context, full):
+    """`diff --plain`: the verb changes as source text, one file per object and an index."""
+    from .diff_sources import select_objects, SourceError
+    from .verb_changes import changed_objects, render_index, render_object, write_plain
+    if not ctx.obj['path']:
+        raise click.UsageError('No NEW dump given: pass --db DUMP or set MOODB')
+    exists = click.Path(exists=True, dir_okay=False)
+    old_path, new_path = exists.convert(old_path, None, ctx), exists.convert(ctx.obj['path'], None, ctx)
+    if output_dir and (Path(output_dir).exists() or Path(output_dir).is_symlink()):
+        _report_failure(ctx, 'output directory already exists')
+    cache = ctx.obj['cache']
+    old, new = (load(path) if cache is None else open_indexed(path, cache) for path in (old_path, new_path))
+    try:
+        selected, dropped = select_objects(old, new, references), set(select_objects(old, new, excluded) or ())
+    except SourceError as error:
+        _report_failure(ctx, error)
+    found = changed_objects(old, new, selected, identity, dollar_names(old), dollar_names(new))
+    left_out = {'--exclude': [entry for entry in found if entry.num in dropped], '--existing': []}
+    kept = []
+    for entry in found:
+        if entry.num in dropped:
+            continue
+        # As on `added`: an object OLD lacks, or whose number was reused since, is not one OLD already had.
+        (left_out['--existing'] if existing and entry.state in ('absent', 'reused') else kept).append(entry)
+    scope = [f"Context: {'whole verbs, changed lines marked' if full else f'{context} lines'}",
+             'Objects: ' + (' '.join(f'#{num}' for num in selected) if selected is not None else 'all')]
+    if dropped:
+        scope.append('Excluded: ' + ' '.join(f'#{num}' for num in sorted(dropped)))
+    if existing:
+        scope.append(f'Only objects OLD already had (--existing, told apart by .{identity})')
+    labels = Path(old_path).name, Path(new_path).name
+    files = {'index.txt': render_index(kept, left_out, *labels, scope)}
+    for entry in kept:
+        files[entry.path] = render_object(entry, old, new, *labels, identity, context, full)
+    if output_dir:
+        write_plain(files, output_dir)
+        click.echo(f"{'different' if kept else 'equal'}: plain {output_dir}")
+    else:
+        click.echo('\n'.join(files.values()), nl=False)
+    ctx.exit(1 if kept else 0)
+
+
 @moodb.command('diff')
 @click.argument('old_path', type=click.Path(dir_okay=False))
 @click.option('--format', 'output_format', type=click.Choice(['text', 'jsonl']), default='text')
 @click.option('--output-dir', type=click.Path(file_okay=False), default=None)
+@click.option('--plain', is_flag=True,
+              help='Verb changes as plain source text: an index and one file per object in --output-dir, '
+                   'or all of it on standard output.')
+@click.option('--exclude', 'excluded', multiple=True, metavar='REF', help='With --plain: leave these objects out (repeatable).')
+@click.option('--existing', is_flag=True,
+              help='With --plain: only objects OLD already had; leaves out new numbers, and numbers recycled and reused since.')
+@click.option('--identity', default='creation_time', show_default=True, metavar='PROP',
+              help='With --plain: the property that tells a reused number from the same object.')
+@click.option('--full', is_flag=True, help='With --plain: show each changed verb whole, its changed lines marked.')
 @_report_options
 @click.pass_context
-def diff(ctx, old_path, output_format, output_dir, view, references, sections, kinds, context, max_events, stop_after, redact, redact_strict):
+def diff(ctx, old_path, output_format, output_dir, plain, excluded, existing, identity, full, view, references, sections,
+         kinds, context, max_events, stop_after, redact, redact_strict):
     """Compare OLD_PATH to --db NEW with typed, exact evidence.
 
     --output-dir writes a bundle and prints its location. Give --format as
     well to also get that report on standard output, from the same
     comparison; the bundle location then goes to standard error.
+
+    --plain writes the verb changes for reading instead: every added or
+    removed verb's whole source and a line diff of every changed one, with
+    nothing escaped. -o, --exclude and --existing choose the objects;
+    --context and --full choose how much of a changed verb is shown.
     """
     from dataclasses import replace
     from .compare import compare_snapshots
     from .diff_sources import freeze_source, select_objects, SourceError
+    given = {name for name in ctx.params if ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE}
+    if plain:
+        unusable = [option for name, option in _NOT_WITH_PLAIN.items() if name in given]
+        if 'view' in given and view != 'code':
+            unusable.append(f'--view {view}')
+        if unusable:
+            raise click.UsageError(f"--plain shows verb changes only and cannot be combined with {', '.join(unusable)}")
+        _plain_diff(ctx, old_path, output_dir, references, excluded, existing, identity, context, full)
+    needs_plain = [option for name, option in _PLAIN_ONLY.items() if name in given]
+    if needs_plain:
+        raise click.UsageError(f"{', '.join(needs_plain)} needs --plain")
     jsonl_started = False
     # Standard output carries the formatted report unless a bundle was asked
     # for without naming a format.
