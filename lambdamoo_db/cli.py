@@ -14,9 +14,10 @@ from .inspection import (
     LookupFailed,
     added_property_definitions,
     added_verb_lines,
-    all_objects,
     all_properties,
+    answers_call,
     builtin_value,
+    defined_property_names,
     descendants,
     dollar_names,
     find_references,
@@ -30,6 +31,7 @@ from .inspection import (
     label,
     lookup_property,
     moo_string,
+    object_heads,
     object_continuity,
     object_flags,
     own_properties,
@@ -502,7 +504,7 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
 
 @moodb.command()
 @click.argument("text", nargs=-1, required=True)
-@click.option("--verb", "mode", flag_value="verb", help="Find objects defining a verb that TEXT would call (MOO name matching).")
+@click.option("--verb", "mode", flag_value="verb", help="Find objects defining a verb that TEXT would call (MOO name matching), waif class verbs (`:TEXT`) included.")
 @click.option("--prop", "mode", flag_value="prop", help="Find objects defining a property named TEXT (case-insensitive).")
 @click.option("--glob", "glob", is_flag=True,
               help="With --verb or --prop: TEXT is a shell pattern (`event_*`) matched against each verb name or the property name.")
@@ -519,20 +521,21 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
     db, names = _db(ctx)
     hits: dict[str, list[str]] = {t: [] for t in text}
     if mode == "verb":
-        for o in all_objects(db):
+        for o in object_heads(db):
             for idx, v in enumerate(o.verbs):
                 verb_names = v.name.lower().split()
+                verb_names += [n[1:] for n in verb_names if n.startswith(":")]  # a waif class verb, as it is called
                 for t in hits:
-                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else verbcasecmp(v.name, t):
+                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else answers_call(v.name, t):
                         hits[t].append(f"{label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
     elif mode == "prop":
-        for o in all_objects(db):
-            for p in own_properties(o):
-                if not isinstance(p.propertyName, str):
+        for num, defined in defined_property_names(db):
+            for name in defined:
+                if not isinstance(name, str):
                     continue
                 for t in hits:
-                    if fnmatchcase(p.propertyName.lower(), t.lower()) if glob else p.propertyName.lower() == t.lower():
-                        hits[t].append(f"{label(db, o.id, names)}.{p.propertyName}")
+                    if fnmatchcase(name.lower(), t.lower()) if glob else name.lower() == t.lower():
+                        hits[t].append(f"{label(db, num, names)}.{name}")
     else:
         for num, name in sorted(db.object_names().items()):
             for t in hits:
