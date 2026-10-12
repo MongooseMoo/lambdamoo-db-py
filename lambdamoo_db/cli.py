@@ -4,6 +4,7 @@ import re
 import shlex
 import sys
 from collections import Counter
+from fnmatch import fnmatchcase
 from itertools import groupby
 from pathlib import Path
 
@@ -500,32 +501,52 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
 
 
 @moodb.command()
-@click.argument("text")
+@click.argument("text", nargs=-1, required=True)
 @click.option("--verb", "mode", flag_value="verb", help="Find objects defining a verb that TEXT would call (MOO name matching).")
 @click.option("--prop", "mode", flag_value="prop", help="Find objects defining a property named TEXT (case-insensitive).")
+@click.option("--glob", "glob", is_flag=True,
+              help="With --verb or --prop: TEXT is a shell pattern (`event_*`) matched against each verb name or the property name.")
+@click.option("-c", "--count", is_flag=True, help="Print only the number of hits for each TEXT.")
 @click.pass_context
-def find(ctx: click.Context, text: str, mode: str | None) -> None:
+def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, count: bool) -> None:
     """Find objects whose name or $name contains TEXT (case-insensitive).
 
     With --verb or --prop, find where a verb or property is defined instead.
+    Several TEXTs are answered in one run, each under an `== TEXT` line.
     """
+    if glob and mode is None:
+        raise click.UsageError("--glob needs --verb or --prop")
     db, names = _db(ctx)
+    hits: dict[str, list[str]] = {t: [] for t in text}
     if mode == "verb":
         for o in all_objects(db):
             for idx, v in enumerate(o.verbs):
-                if verbcasecmp(v.name, text):
-                    click.echo(f"{label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
-        return
-    if mode == "prop":
+                verb_names = v.name.lower().split()
+                for t in hits:
+                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else verbcasecmp(v.name, t):
+                        hits[t].append(f"{label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
+    elif mode == "prop":
         for o in all_objects(db):
             for p in own_properties(o):
-                if isinstance(p.propertyName, str) and p.propertyName.lower() == text.lower():
-                    click.echo(f"{label(db, o.id, names)}.{p.propertyName}")
-        return
-    needle = text.lower().lstrip("$")
-    for num, name in sorted(db.object_names().items()):
-        if needle in name.lower() or needle in names.get(num, "").lower():
-            click.echo(label(db, num, names))
+                if not isinstance(p.propertyName, str):
+                    continue
+                for t in hits:
+                    if fnmatchcase(p.propertyName.lower(), t.lower()) if glob else p.propertyName.lower() == t.lower():
+                        hits[t].append(f"{label(db, o.id, names)}.{p.propertyName}")
+    else:
+        for num, name in sorted(db.object_names().items()):
+            for t in hits:
+                needle = t.lower().lstrip("$")
+                if needle in name.lower() or needle in names.get(num, "").lower():
+                    hits[t].append(label(db, num, names))
+    for t, lines in hits.items():
+        if count:
+            click.echo(f"{len(lines):6d}  {t}")
+            continue
+        if len(hits) > 1:
+            click.echo(f"== {t}")
+        for line in lines:
+            click.echo(line)
 
 
 @moodb.command()
