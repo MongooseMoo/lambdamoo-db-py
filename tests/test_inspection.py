@@ -718,3 +718,13 @@ def test_cli_help_and_missing_db(monkeypatch):
     assert r.exit_code == 0 and "--context" in r.output
     r = CliRunner().invoke(moodb, ["info"])
     assert r.exit_code == 2 and "pass --db DUMP or set MOODB" in r.output
+
+
+def test_cli_patterns_are_not_local_file_names(tmp_path, monkeypatch, capsys):
+    (tmp_path / "request.txt").write_text("")
+    monkeypatch.chdir(tmp_path)
+    arguments = ["--db", str(TOASTCORE), "--no-cache", "find", "--prop", "--glob", "*quest*", "*zzz*"]
+    monkeypatch.setattr("sys.argv", ["moodb", *arguments])
+    moodb.main(standalone_mode=False)
+    output = capsys.readouterr().out
+    assert "== *quest*" in output and "request.txt" not in output
