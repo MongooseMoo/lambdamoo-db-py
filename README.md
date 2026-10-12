@@ -64,7 +64,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 |---|---|
 | `info` | dump format and counts of objects, verbs, players, `$names`, tasks and waifs |
 | `obj REF` | owner, location, flags, parents, ancestry, verbs and own properties |
-| `props REF [--builtin] [--full]` | every property, own and inherited, grouped by the defining object, with the effective value and where a `clear` value comes from |
+| `props REF [--builtin] [--full] [--name GLOB]... [-r [--group]]` | every property, own and inherited, grouped by the defining object, with the effective value and where a `clear` value comes from. `--name '*_msg'` keeps matching names. `-r` prints one line per value: REF's effective values, then each descendant's own (not clear) values, so `props '$thing' -r --name '*_msg'` shows which descendants override what. `--group` (with `-r`) prints one line per distinct name and value with the number of objects holding it and the first five |
 | `verbs REF [-i]` | verbs with args, perms and owner; `-i` adds every ancestor's verbs |
 | `code SPEC... [-n]` | verb source as `@program` blocks; a bare REF prints all of its verbs; `-n` numbers lines |
 | `prop SPEC... [--full]` | effective property values as MOO literals, naming the definer when inherited |

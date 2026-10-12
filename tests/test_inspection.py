@@ -642,6 +642,37 @@ def test_cli_grep_context_and_bad_regex():
     assert r.exit_code == 2 and "Invalid value for PATTERN" in r.output
 
 
+def test_cli_props_name_and_descendants(db):
+    r = run("props", "$string_utils", "--name", "ALIAS*")
+    assert r.exit_code == 0
+    assert [line.split("  ")[1] for line in r.output.splitlines() if line.startswith("  .")] == [".aliases"]
+
+    # -r: the object's effective value, then each descendant that stores its own value.
+    r = run("props", "1", "-r", "--name", "aliases", "--name", "key")
+    assert r.exit_code == 0
+    lines = r.output.splitlines()
+    assert lines[0].startswith('#1 $root_class "Root Class".key = ')
+    assert lines[1].startswith('#1 $root_class "Root Class".aliases = ')
+    seen = {(int(m[1]), m[2]) for m in (re.match(r"#(\d+) .*\.(\w+) = ", line) for line in lines)}
+    assert len(seen) == len(lines)
+    root = db.objects[1]
+    expected = {(1, "key"), (1, "aliases")}
+    for o in db.objects.values():
+        if o is not root and root in db.ancestors(o):
+            for name in ("key", "aliases"):
+                if o.properties[find_slot(db, o, name).index].value is not CLEAR:
+                    expected.add((o.id, name))
+    assert seen == expected and len(expected) > 2
+
+    # --group: one line per distinct name and value, counting the objects that hold it.
+    r = run("props", "1", "-r", "--name", "key", "--group")
+    assert r.exit_code == 0
+    counts = [int(re.search(r"  x(\d+)  #", line)[1]) for line in r.output.splitlines()]
+    assert sum(counts) == len([e for e in expected if e[1] == "key"]) and counts == sorted(counts, reverse=True)
+    assert all(line.startswith(".key = ") for line in r.output.splitlines())
+    assert run("props", "1", "--group").exit_code == 2
+
+
 def test_cli_new_commands():
     r = run("info")
     assert "objects   127 (+0 anonymous)" in r.output and "tasks     1 queued" in r.output

@@ -38,6 +38,7 @@ from .inspection import (
     property_perms,
     resolve_object,
     split_ref,
+    stored_properties,
     tasks as list_tasks,
     tree_summary,
     value_holders,
@@ -102,7 +103,15 @@ def moodb_join(indir: str, outfile: str | None, compare: str | None) -> None:
 # moodb: read-only inspection
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class _LiteralArgs(click.Group):
+    """Arguments are patterns and MOO references, never file globs: on Windows click would expand `*_msg` itself."""
+
+    def main(self, *args, **kwargs):
+        kwargs.setdefault("windows_expand_args", False)
+        return super().main(*args, **kwargs)
+
+
+@click.group(cls=_LiteralArgs, context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--db", "db_path", envvar="MOODB", type=str,
               help="Textdump to read (or set MOODB).")
 @click.option("--no-cache", is_flag=True, help="Parse the whole dump, without reading or writing its offset index.")
@@ -247,17 +256,46 @@ def obj(ctx: click.Context, ref: str) -> None:
 @click.argument("ref")
 @click.option("--full", is_flag=True, help="Do not truncate long values.")
 @click.option("--builtin", is_flag=True, help="Also show builtin properties (name, owner, location, ...).")
+@click.option("--name", "globs", multiple=True, metavar="GLOB",
+              help="Only properties whose name matches (case-insensitive, repeatable): --name '*_msg'.")
+@click.option("-r", "--descendants", "recursive", is_flag=True,
+              help="One line per value: REF's effective values, then every descendant's own (not clear) values.")
+@click.option("--group", is_flag=True,
+              help="With -r: one line per distinct name and value, with how many objects hold it and the first five.")
 @click.pass_context
-def props(ctx: click.Context, ref: str, full: bool, builtin: bool) -> None:
+def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[str, ...], recursive: bool,
+          group: bool) -> None:
     """List every property of an object, own and inherited, with effective values."""
     db, names = _db(ctx)
     o = _object(db, ref)
     limit = None if full else 100
+    patterns = [g.lower() for g in globs]
+
+    def wanted(name: str) -> bool:
+        return not patterns or any(fnmatchcase(name.lower(), g) for g in patterns)
+
+    if group and not recursive:
+        raise click.UsageError("--group needs -r")
+    if recursive:
+        rows = [(o, h.name, h.value) for h in all_properties(db, o) if wanted(h.name)]
+        rows += [(d, name, value) for d in descendants(db, o) for name, value in stored_properties(db, d) if wanted(name)]
+        if group:
+            holders: dict[tuple[str, str], list[int]] = {}
+            for holder, name, value in rows:
+                holders.setdefault((name.lower(), format_value(value, limit)), []).append(holder.id)
+            for (name, text), ids in sorted(holders.items(), key=lambda kv: (kv[0][0], -len(kv[1]), kv[0][1])):
+                shown = " ".join(f"#{i}" for i in ids[:5]) + (" ..." if len(ids) > 5 else "")
+                click.echo(f".{name} = {text}  x{len(ids)}  {shown}")
+            return
+        for holder, name, value in rows:
+            click.echo(f"{label(db, holder.id, names)}.{name} = {format_value(value, limit)}")
+        return
     if builtin:
         click.echo("== builtin")
         for n in BUILTIN_PROPS:
-            click.echo(f"  .{n}  = {format_value(builtin_value(o, n), limit)}")
-    for definer, hits in groupby(all_properties(db, o), key=lambda h: h.definer.id):
+            if wanted(n):
+                click.echo(f"  .{n}  = {format_value(builtin_value(o, n), limit)}")
+    for definer, hits in groupby((h for h in all_properties(db, o) if wanted(h.name)), key=lambda h: h.definer.id):
         click.echo(f"== {label(db, definer, names)}")
         for h in hits:
             source = "" if h.value_from is o else f"  (clear, from #{h.value_from.id})"
