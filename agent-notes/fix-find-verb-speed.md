@@ -14,7 +14,10 @@ Assignment from the hub's team lead, 2026-10-12:
 - Cause read from the code, before any change: `find` loops `all_objects(db)` (`inspection.py:296`), which calls `db.objects.values()`; on a `LazyDatabase` that is `_LazyObjects.values` (`lazy.py:140`) → `load_all` (`lazy.py:227`) → `load()`, a full parse of the dump with every property value. `grep` instead uses `LazyDatabase.objects_with_programs` (`lazy.py:242`), which reads each record only up to its properties (`Reader.read_object_head_ng`).
 - Baselines before the change, this worktree at `27b52e0`, default index cache: `find --verb sync_hum` 73.3 s (five `"*"` verbs, nothing on #155369); `find --prop hum_sound sync_hum 'forbid_*' --glob` 74.5 s (run while another full parse was running).
 - RED seen: 9 new tests in `tests/test_lazy.py` failed (full parse refused; waif verb not listed).
-- Change made, not yet timed or committed:
+- After the change, same dump, index in a scratch `--cache-dir`: `find --verb sync_hum` 2.9 s (2.94, 2.86), with #155369's `":sync_hum"` as a sixth line; `find --prop` (same three names) 2.9 s; `grep -l ':sync_hum'` 3.4 s in the same session. `find --verb event_say forbid_get weave` and the `find --prop` run print exactly what they printed before.
+- First version of the fix opened the dump once per record and took 8.7 s; a profile showed 44,565 `open` calls costing about 4 s, so the scan now holds one handle (`LazyDatabase._scanning`).
+- `uv run pytest -q`: 912 passed, 8 skipped (2026-10-12).
+- The change:
   - `Reader.read_propdef_names` split out of `readProperties` (`reader.py`).
   - `LazyDatabase.read_head`, `object_heads`, `defined_property_names` (`lazy.py`); `objects_with_programs` and `verb_changes.verb_holders` use `read_head`.
   - `inspection.object_heads`, `defined_property_names`, `waif_spelling`, `answers_call`; `find_verb` uses `waif_spelling`.
@@ -35,4 +38,4 @@ Assignment from the hub's team lead, 2026-10-12:
 
 ## Next step
 
-Whole suite green, then time `find --verb sync_hum` and `find --prop` with `--cache-dir` in the scratchpad, diff `find --verb event_say forbid_get weave` against the saved baseline, commit, push, open the PR.
+Review and merge of the PR is Q's. After the merge, remove this worktree and branch.

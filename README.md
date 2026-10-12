@@ -71,7 +71,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `grep PATTERN [-o REF] [-i] [-F] [-l] [-C N]` | Python regex over all verb code; `-o` limits to objects, `-l` lists verbs once, `-C` adds context |
 | `added OLD [PATTERN] [-i] [-F] [-l]` | added or replaced verb code lines relative to OLD; optional Python regex, `-F` for literal text, `-l` for counts per verb |
 | `find TEXT` | objects whose name or `$name` contains TEXT |
-| `find --verb NAME` | objects defining a verb that a call to NAME would match |
+| `find --verb NAME` | objects defining a verb that a call to NAME would match, waif class verbs (stored as `:NAME`) included |
 | `find --prop NAME` | objects defining a property called NAME |
 | `refs REF` | property values holding the object, and verb code lines mentioning `#N` or its `$name` |
 | `values PATTERN [-i] [-F] [--in-waif REF]` | Python regex over every stored string: each object's own property values (anonymous objects included), through lists, map keys and values, and into waifs. Prints the path, e.g. `#4982.systems[10]<waif #4238>.sounds["engage"]<waif #3010>.snd = "..."`, with waif slots named and list indexes 1-based. `--in-waif` keeps only strings inside a waif of that class or a descendant |
@@ -205,7 +205,8 @@ Lookups follow ToastStunt rather than a simplified model:
   inherited property slots, including on multi-parent objects.
 - Verb names match like `verbcasecmp()`. The x bit is not required, so command
   verbs are found too. Waif verbs (stored as `:name`) are found by their plain
-  name when nothing else matches.
+  name when nothing else matches; `find --verb` lists them beside the plain
+  verbs, under the stored name.
 - A `clear` property takes its value from the first parent that inherits the
   defining object, repeatedly, as `db_find_property()` does.
 
@@ -233,8 +234,11 @@ only the records they need from the dump itself:
 - `obj`, `props`, `verbs`, `code`, `prop`, `children`, `contents`, `players`,
   `tasks` and `find TEXT` read a few records, or none.
 - `grep` reads the verb definitions and code, not the properties.
-- `info`, `find --verb`, `find --prop`, `refs` and `values` look at every
-  object, so they parse the whole dump each time.
+- `find --verb` reads every object's verb definitions and `find --prop` the
+  names of the properties each object defines; neither parses a property
+  value or verb code.
+- `info`, `refs` and `values` look at every object, so they parse the whole
+  dump each time.
 
 The index lives under `lambdamoo-db` in `$XDG_CACHE_HOME`, `%LOCALAPPDATA%` or
 `~/.cache`. Change that with `--cache-dir`. `--no-cache` parses the whole dump

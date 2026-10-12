@@ -39,10 +39,10 @@ def verb_holders(db: MooDatabase) -> dict[int, MooObject]:
     found = {o.id: o for o in db.objects_with_programs()}
     # A verb can be defined and never programmed, and the index lists only
     # programs, so the head of every other record is read for its definitions.
-    for oid, (start, end, anon) in db.index.records.items():
+    for oid, (_, _, anon) in db.index.records.items():
         if oid in found or anon:
             continue
-        found[oid] = db.objects.loaded.get(oid) or db._reader(start, end).read_object_head_ng(db)  # type: ignore[attr-defined]
+        found[oid] = db.objects.loaded.get(oid) or db.read_head(oid)  # type: ignore[attr-defined]
     return {oid: o for oid, o in found.items() if o.verbs and not o.anon}
 
 

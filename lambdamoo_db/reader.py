@@ -605,11 +605,10 @@ class Reader:
         verb = Verb(name, owner, perms, preps, obj.id)
         obj.verbs.append(verb)
 
-    def readProperties(self, db: MooDatabase, obj: MooObject):
-        logger.debug(f"Reading properties for #{obj.id}")
+    def read_propdef_names(self) -> list[str]:
+        """The names of the properties an object defines, which follow its head and precede every value."""
         # propdefs_count = properties DEFINED on this object (with names)
         propdefs_count = self.readCount()
-        obj.propdefs_count = propdefs_count
         logger.debug(f"  propdefs_count = {propdefs_count}")
         debug = self.debug
         propertyNames = []
@@ -618,6 +617,14 @@ class Reader:
             propertyNames.append(name)
             if debug:
                 logger.debug(f"  read propdef[{i}] name")
+        return propertyNames
+
+    def readProperties(self, db: MooDatabase, obj: MooObject):
+        logger.debug(f"Reading properties for #{obj.id}")
+        propertyNames = self.read_propdef_names()
+        propdefs_count = len(propertyNames)
+        obj.propdefs_count = propdefs_count
+        debug = self.debug
         # nval = total property VALUES (defined + inherited)
         nval = self.readCount()
         if nval < propdefs_count:

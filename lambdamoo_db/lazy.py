@@ -13,7 +13,8 @@ import os
 import pickle
 import re
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -198,8 +199,18 @@ class LazyDatabase(MooDatabase):
             f.seek(start)
             return f.read(end - start)
 
-    def _reader(self, start: int, end: int) -> Reader:
-        return Reader(_LineSource(self._read(start, end)), str(self.path))  # type: ignore[arg-type]
+    @contextmanager
+    def _scanning(self) -> Iterator[Callable[[int, int], bytes]]:
+        """``_read`` through one handle, for a scan of every record: opening the dump for each costs as much as parsing its head."""
+        with open(self.path, "rb") as f:
+            def read(start: int, end: int) -> bytes:
+                f.seek(start)
+                return f.read(end - start)
+
+            yield read
+
+    def _reader(self, start: int, end: int, read: Callable[[int, int], bytes] | None = None) -> Reader:
+        return Reader(_LineSource((read or self._read)(start, end)), str(self.path))  # type: ignore[arg-type]
 
     def object_names(self) -> dict[int, str]:
         return self.index.names
@@ -249,12 +260,48 @@ class LazyDatabase(MooDatabase):
         for oid in sorted(self.index.programs):
             obj = self.objects.loaded.get(oid)  # type: ignore[attr-defined]
             if obj is None:
-                start, end, anon = self.index.records[oid]
-                obj = self._reader(start, end).read_object_head_ng(self)
-                obj.anon = anon
+                obj = self.read_head(oid)
                 self._read_programs(obj)
             found.append(obj)
         return found
+
+    def _head_reader(self, oid: int, read: Callable[[int, int], bytes] | None = None) -> tuple[MooObject, Reader]:
+        """An object read up to its properties, and the reader left where they start."""
+        start, end, anon = self.index.records[oid]
+        reader = self._reader(start, end, read)
+        obj = reader.read_object_head_ng(self)
+        obj.anon = anon
+        return obj, reader
+
+    def read_head(self, oid: int) -> MooObject:
+        """An object's header fields and verb definitions, without its properties or verb code; not kept."""
+        return self._head_reader(oid)[0]
+
+    def object_heads(self) -> Iterator[MooObject]:
+        """Every object in object order, for searching the verb definitions.
+
+        The index says where a record is, not what it defines, so every record
+        is read, but an object not loaded yet only as far as ``read_head``.
+        """
+        loaded = self.objects.loaded  # type: ignore[attr-defined]
+        with self._scanning() as read:
+            for oid in sorted(self.index.records):
+                yield loaded[oid] if oid in loaded else self._head_reader(oid, read)[0]
+
+    def defined_property_names(self) -> Iterator[tuple[int, list[str]]]:
+        """(object, the names of the properties it defines) for every object, in object order.
+
+        The names stand between an object's head and its property values, so
+        no value is parsed for an object not loaded yet.
+        """
+        loaded = self.objects.loaded  # type: ignore[attr-defined]
+        with self._scanning() as read:
+            for oid in sorted(self.index.records):
+                if oid in loaded:
+                    obj = loaded[oid]
+                    yield oid, [p.propertyName for p in obj.properties[: obj.propdefs_count]]
+                else:
+                    yield oid, self._head_reader(oid, read)[1].read_propdef_names()
 
 
 def default_cache_dir() -> Path:

@@ -229,6 +229,16 @@ def verbcasecmp(verb: str, word: str) -> bool:
     return False
 
 
+def waif_spelling(word: str) -> str:
+    """The name a waif class verb is stored under: ``waif:word()`` runs the verb ``:word`` of the waif's class."""
+    return word if word.startswith(":") else ":" + word
+
+
+def answers_call(verb: str, word: str) -> bool:
+    """Would a call to WORD run the verb named VERB, on an object or, as a waif class verb, on a waif?"""
+    return verbcasecmp(verb, word) or verbcasecmp(verb, waif_spelling(word))
+
+
 @attrs.frozen
 class VerbHit:
     obj: MooObject
@@ -252,7 +262,7 @@ def find_verb(db: MooDatabase, obj: MooObject, wanted: str, inherited: bool = Tr
             raise LookupFailed(f"#{obj.id} has only {len(obj.verbs)} verbs (indexes are 0-based)")
         return VerbHit(obj, idx, obj.verbs[idx])
     search = db.ancestors(obj) if inherited else [obj]
-    for name in (wanted,) if wanted.startswith(":") else (wanted, ":" + wanted):
+    for name in dict.fromkeys((wanted, waif_spelling(wanted))):
         for o in search:
             for idx, v in enumerate(o.verbs):
                 if verbcasecmp(v.name, name):
@@ -295,6 +305,15 @@ def verb_summary(verb: Verb) -> str:
 
 def all_objects(db: MooDatabase) -> Iterator[MooObject]:
     return iter(sorted(db.objects.values(), key=lambda o: o.id))
+
+
+def object_heads(db: MooDatabase) -> Iterator[MooObject]:
+    """Every object in number order, for its header fields and verb definitions.
+
+    Through an offset index the objects come without properties or verb code,
+    which is most of a dump; ``all_objects`` parses all of it.
+    """
+    return db.object_heads() if isinstance(db, LazyDatabase) else all_objects(db)
 
 
 @attrs.frozen
@@ -397,6 +416,13 @@ def object_continuity(old: MooDatabase, new: MooDatabase, num: int, identity: st
 
 def own_properties(obj: MooObject) -> list[Property]:
     return obj.properties[: obj.propdefs_count]
+
+
+def defined_property_names(db: MooDatabase) -> Iterator[tuple[int, list[str]]]:
+    """(object number, the names of the properties it defines) for every object, in number order."""
+    if isinstance(db, LazyDatabase):
+        return db.defined_property_names()
+    return ((o.id, [p.propertyName for p in own_properties(o)]) for o in all_objects(db))
 
 
 @attrs.frozen

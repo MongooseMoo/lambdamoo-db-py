@@ -6,7 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from lambdamoo_db.cli import moodb
-from lambdamoo_db.database import ObjNum, Property, Waif, WaifReference
+from lambdamoo_db.database import ObjNum, Property, Verb, Waif, WaifReference
 from lambdamoo_db.lazy import LazyDatabase, build_index, index_path_for, open_indexed
 from lambdamoo_db.reader import load
 from lambdamoo_db.writer import dump
@@ -83,6 +83,83 @@ def test_objects_with_programs_carry_every_verb_and_its_code(path):
     assert lazy.objects[expected[0].id] == expected[0]
 
 
+def _no_full_parse(monkeypatch):
+    import lambdamoo_db.lazy as lazy_module
+
+    def refuse(path):
+        raise AssertionError(f"full parse of {path}")
+
+    monkeypatch.setattr(lazy_module, "load", refuse)
+
+
+@pytest.mark.parametrize("path", V17_DUMPS, ids=lambda p: p.name)
+def test_object_heads_carry_every_verb_definition_without_a_full_parse(path, monkeypatch):
+    full = load(str(path))
+    index, _ = build_index(path)
+    lazy = LazyDatabase(path, index)
+    already = lazy.objects[0]
+    loaded = dict(lazy.objects.loaded)
+    _no_full_parse(monkeypatch)
+    expected = sorted(full.objects.values(), key=lambda o: o.id)
+    found = list(lazy.object_heads())
+    signature = lambda o: (o.id, o.name, o.anon, [(v.name, v.owner, v.perms, v.preps) for v in o.verbs])  # noqa: E731
+    assert [signature(o) for o in found] == [signature(o) for o in expected]
+    # Read without their properties, so they must not stand in for the real objects.
+    assert found[0] is already
+    assert lazy.objects.loaded == loaded
+
+
+@pytest.mark.parametrize("path", V17_DUMPS, ids=lambda p: p.name)
+def test_defined_property_names_equal_the_full_parse_without_one(path, monkeypatch):
+    full = load(str(path))
+    index, _ = build_index(path)
+    lazy = LazyDatabase(path, index)
+    lazy.objects[0]
+    loaded = dict(lazy.objects.loaded)
+    _no_full_parse(monkeypatch)
+    expected = [(o.id, [p.propertyName for p in o.properties[: o.propdefs_count]])
+                for o in sorted(full.objects.values(), key=lambda o: o.id)]
+    assert any(names for _, names in expected)
+    assert list(lazy.defined_property_names()) == expected
+    assert lazy.objects.loaded == loaded
+
+
+@pytest.mark.parametrize("query", [["find", "--verb", "from_list"], ["find", "--prop", "string_utils", "NAME*", "--glob"]],
+                         ids=" ".join)
+def test_cli_find_reads_definitions_through_the_index_without_a_full_parse(query, tmp_path, monkeypatch):
+    plain = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "--no-cache", *query])
+    assert plain.exit_code == 0 and plain.output, plain.output
+    open_indexed(TOASTCORE, tmp_path)
+    _no_full_parse(monkeypatch)
+    r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "--cache-dir", str(tmp_path), *query])
+    assert r.exit_code == 0, r.exception
+    assert r.output == plain.output
+
+
+def test_cli_find_verb_lists_a_waif_class_verb_under_its_stored_name(tmp_path):
+    """A waif class verb is stored as `:name` and called as `waif:name()`, so the plain name must find it."""
+    db = load(str(TOASTCORE))
+    db.objects[20].verbs.append(Verb(":only_on_waifs", ObjNum(2), 173, -1, 20))  # defined, never programmed
+    path = tmp_path / "waif_verb.db"
+    with open(path, "w", encoding="latin-1", newline="") as f:
+        dump(db, f)
+    stored = '#20 $string_utils "string utilities":[79] ":only_on_waifs"  this none this  rxd  owner #2'
+    for cache in (["--no-cache"], ["--cache-dir", str(tmp_path / "cache")], ["--cache-dir", str(tmp_path / "cache")]):
+        def find(*args):
+            r = CliRunner().invoke(moodb, ["--db", str(path), *cache, "find", "--verb", *args])
+            assert r.exit_code == 0, r.output
+            return r.output.splitlines()
+
+        assert stored in find("only_on_waifs")
+        assert stored in find(":only_on_waifs")
+        assert stored in find("--glob", "ONLY_on_*")
+        assert stored in find("--glob", ":only_on_*")
+        # A plain verb is not a waif verb: the colon spelling asks for the waif one alone.
+        plain = find("from_list")
+        assert stored not in plain and any('"from_list"' in line for line in plain)
+        assert not any('"from_list"' in line for line in find(":from_list"))
+
+
 def test_asking_for_every_object_parses_once_and_keeps_loaded_objects(monkeypatch):
     import lambdamoo_db.lazy as lazy_module
 
@@ -131,6 +208,7 @@ def test_open_indexed_parses_older_formats_whole(tmp_path):
         ["grep", "-F", "-C", "1", "tostr("],
         ["grep", "-l", "notify", "-o", "$string_utils"],
         ["find", "--verb", "from_list"],
+        ["find", "--prop", "string_utils"],
         ["refs", "$string_utils"],
         ["values", "string"],
         ["children", "-r", "1"],
