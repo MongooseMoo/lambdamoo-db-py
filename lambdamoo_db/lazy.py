@@ -183,6 +183,7 @@ class LazyDatabase(MooDatabase):
         self.path = Path(db_path)
         self.index = index
         self._all_loaded = False
+        self._relationship_objects: dict[int, MooObject] = {}
         self.objects = _LazyObjects(self)  # type: ignore[assignment]
         self.waifs = _LazyWaifs(self)  # type: ignore[assignment]
         header = self._read(0, index.header_end)
@@ -228,6 +229,41 @@ class LazyDatabase(MooDatabase):
         reader.process_propnames(self, obj)
         self._read_programs(obj)
         return obj
+
+    def relationship_object(self, oid: int, read: Callable[[int, int], bytes] | None = None) -> MooObject | None:
+        """Read raw property slots for graph inspection, without programs.
+
+        This separate cache never exposes partially loaded objects through
+        ``objects``. Slot indexes and own propdefs suffice for graph evidence;
+        ordinary inspection still gets resolved names and complete programs.
+        """
+        if oid not in self.index.records:
+            return None
+        loaded = self.objects.loaded.get(oid)
+        if loaded is not None:
+            return loaded
+        if oid not in self._relationship_objects:
+            start, end, anon = self.index.records[oid]
+            obj = self._reader(start, end, read).readObject_ng(self)
+            obj.anon = anon
+            self._relationship_objects[oid] = obj
+        return self._relationship_objects[oid]
+
+    def relationship_objects(self) -> Iterator[MooObject]:
+        """Scan raw relationship records through one handle, without programs."""
+        with self._scanning() as read:
+            for oid in self.index.records:
+                yield self.relationship_object(oid, read)
+
+    def relationship_waif(self, index: int) -> Waif | None:
+        """Read a waif's defining record without reading its verb programs."""
+        if index not in self.index.waif_homes:
+            return None
+        if index not in self.waifs.loaded:
+            home = self.index.waif_homes[index]
+            if home is not None:
+                self.relationship_object(home)
+        return self.waifs.loaded.get(index)
 
     def _read_programs(self, obj: MooObject) -> None:
         for start, end in self.index.programs.get(obj.id, ()):
