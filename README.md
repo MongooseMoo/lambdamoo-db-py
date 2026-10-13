@@ -79,8 +79,176 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `players` | player objects and their flags |
 | `tasks [-v]` | queued, suspended and interrupted tasks: id, due time (UTC) and frame; `-v` shows the whole stack |
 | `batch [QUERY...]` | the answers to several of the commands above, in one run |
+| `graph outgoing REF`, `graph incoming REF` | typed property relationships with exact stored-slot evidence; incoming scans the whole snapshot once |
+| `graph neighborhood REF`, `graph path SOURCE TARGET` | bounded relationships and shortest directed paths, with explicit coverage and truncation |
+| `graph dangling` | missing object/waif references, type mismatches, and special negatives counted separately |
+| `graph fingerprint`, `graph audit EXPECTATIONS.json` | snapshot SHA256 and declarative required-connection checks; `graph --overlay FILE` supplies external relation evidence |
 
 Every command exits 1 with a message when a reference does not resolve.
+
+### Reading relationships sideways
+
+```sh
+moodb --db world.db graph outgoing '$httpd' --format json
+moodb --db world.db graph --labels outgoing '$httpd' --format json
+moodb --db world.db graph incoming '$httpd' --format json
+moodb --db world.db graph neighborhood '$root_class' --kind child --max-depth 2 --max-nodes 100
+moodb --db world.db graph path '#410' '#852' --max-depth 6 --format json
+moodb --db world.db graph dangling --kind property --kind waif-property --format json
+moodb --db world.db batch 'graph incoming #410 --format json' 'graph incoming #852 --format json' 'obj #410'
+```
+
+The default CLI relation kinds are `property`, `waif-property`, and any supplied
+external kinds. Ownership and ancestry can connect many otherwise unrelated
+systems; include them explicitly with repeatable `--kind` options when those
+relationships answer your question. The structural kinds are `owner`,
+`location`, `parent`, `child`, `content`, `waif-class` and `waif-owner`. Stored
+parent/child and location/content lists remain separate evidence: the tool
+does not fabricate reciprocal edges. Integer values and strings containing
+`#N` are not object references; typed object-valued map keys are references.
+Graph queries do not search verb source or evaluate code.
+
+Nodes preserve identity types: `#410`, `anonymous:27`, `waif:3`. Anonymous and
+waif numbers identify records in this snapshot; they do not prove persistent
+identity between dumps. A waif reference is an edge to a waif node, whose
+`waif-property` edges describe its slots. This handles shared waifs and cycles
+without duplicating whole waif bodies for each holder. Explicit `#N` CLI roots
+resolve anonymous records to their anonymous node identity; references stored
+with the wrong type are diagnosed as `type_mismatch`.
+
+Each edge reports `source`, `target`, `kind`, `evidence`, `provenance` and
+`value_from`. Evidence is an exact ordinal path, for example
+`["property-slot:7", "list:2", "map:1:key"]`: object property slots are
+0-based, lists and map entries are 1-based, and map key/value positions are
+distinct. Map ordinals follow the stored parser order. No object names,
+property names, map-key strings, arbitrary property values or code are printed.
+Use `props`/`prop` deliberately if you need to interpret a slot's name or value.
+To interpret graph evidence directly, opt in with `graph --labels`. Each edge
+then includes a `labels` dictionary naming existing object endpoints and the
+defining property and object, where applicable. Names may contain sensitive
+text; labels are opt-in. Values and map-key strings remain excluded. Resolving
+labels can read additional object/ancestor property records.
+
+Stored mode reads every non-clear slot on its actual holder, including local
+overrides of inherited definitions. It omits clear slots. `graph --effective`
+follows clear values through the first applicable parent, with
+`provenance: "effective"` and `value_from` identifying the original holder.
+The source remains the object on which the effective property was requested;
+its evidence indexes that source object's slot. This can produce inherited
+references on many descendants, so use it deliberately.
+An effective clear chain that cannot resolve (for example, a missing parent or
+clear inheritance cycle) leaves property coverage incomplete, preventing a
+false negative connection claim.
+
+Neighborhood and path traversal is iterative breadth-first search. Defaults
+are `--max-depth 3 --max-nodes 100 --max-edges 1000`; all bounds are configurable.
+`outgoing`/`incoming` output defaults to `--limit 500` and reports `total_edges`
+and truncation. JSON neighborhoods include each node's shortest depth and
+status, edges, selected kinds, `coverage_complete`, and reasons for
+`truncated`. A path is `present` when observed, `missing` only when the explored
+topology is complete and unbounded by these limits, or `unknown` when bounds
+or missing evidence prevent that conclusion. An absent/special source yields
+`unknown`; an observed edge to a dangling destination is still stored topology
+and the destination status makes its absence explicit. Cycles and shared
+descendants are visited once. `#-1` (nothing), `#-2` (ambiguous), `#-3` (failed
+match), and other negative object values are terminal special references;
+they are never reported as missing positive objects. Missing waifs and
+object/anonymous type mismatches have separate diagnostics.
+
+The first uncached dump read still builds the existing offset index through a
+whole parse. Once indexed, numeric outgoing queries read only the requested
+property record; testing reference existence uses index metadata. Graph reads
+do not read verb programs. Inbound and dangling queries read all property
+records through one file handle and build one reverse index, reused by
+subsequent queries in `batch`. They necessarily cost more than outgoing
+queries. `--effective` also reads relevant ancestors. `$name` resolution can
+invoke ordinary property inspection. With `--no-cache`, the existing whole
+parser loads everything. The Python API is `RelationshipGraph(db)` in
+`lambdamoo_db.relationship_graph`; its unfiltered API includes all structural
+and property kinds. Treat its database as immutable for the index's lifetime.
+
+### Generic external relationships and connection expectations
+
+Event systems, registries and service routing can supply evidence without
+teaching this package a particular world's dispatch implementation. Export
+such evidence in the owning application, label kinds explicitly (for example
+`registered-listener` versus `observed-delivery`), and bind it to this dump's
+bytes. Get the binding with `moodb --db world.db graph fingerprint`. The
+fingerprint command hashes bytes without parsing the dump. A supplied overlay
+must use the exact SHA256; mismatches fail before returning graph results.
+Hashing the snapshot is additional I/O, done once per process/batch.
+
+```json
+{
+  "version": 1,
+  "snapshot_sha256": "REPLACE_WITH_THE_64_CHARACTER_SHA256",
+  "source": "application-registration-export",
+  "edges": [
+    {"source": "#410", "target": "#852", "kind": "registered-listener",
+     "evidence": ["registry-slot:12", "subscription:2"]}
+  ],
+  "coverage": [
+    {"kind": "registered-listener", "sources": ["#410"]}
+  ]
+}
+```
+
+```sh
+moodb --db world.db graph --overlay registrations.json outgoing '#410' --kind registered-listener --format json
+moodb --db world.db graph --overlay registrations.json path '#410' '#852' --kind registered-listener
+moodb --db world.db graph --overlay registrations.json audit connections.json --format json
+```
+
+External kinds must differ from built-in kinds. Edge sources and covered
+sources must exist in this snapshot; dangling targets remain diagnosable.
+`coverage` declares complete outgoing evidence for each named source and kind;
+`sources: "*"` declares a whole-provider scan for that kind. An empty scope or
+omitted kind declares no completeness. Supplying one positive edge establishes
+that edge, but never establishes the absence of other edges. Inbound absence
+needs whole-provider coverage, because an unscanned source may point to the
+target. Complete scope is a claim made by the exporting application; the
+library cannot verify runtime export fidelity. External source labels and
+evidence strings are caller-supplied and printed verbatim: keep secrets out
+of them. Text output escapes terminal control characters and directionality
+controls; JSON escapes them while preserving the original evidence on decode.
+Built-in evidence prints only ordinals and typed identities.
+
+An expectations file uses this schema:
+
+```json
+{
+  "version": 1,
+  "expectations": [
+    {"id": "controller-to-engine", "source": "#410", "target": "#852",
+     "kinds": ["registered-listener"], "mode": "direct"},
+    {"id": "controller-can-reach-engine", "source": "#410", "target": "#852",
+     "kinds": ["property", "waif-property", "registered-listener"], "mode": "path"}
+  ]
+}
+```
+
+`direct` requires an actual edge, even for identical endpoints. `path` allows
+a zero-length path for an existing object to itself. Each result is `present`,
+`missing`, or `unknown`, with evidence for observed paths. Missing endpoints
+produce `unknown`; bounds and incomplete provider coverage also prevent a
+negative conclusion. `direct` checks the source's edges up to `--max-edges`;
+depth/node limits apply to `path`. Audit exits 0 if every expectation is
+present, 1 if any is missing, or 3 if none are missing and any are unknown.
+Other graph commands return successfully for valid queries and report their
+semantic status in the output. A topology path shows stored or supplied
+relationships; it does not prove executable event delivery, authorization,
+current runtime state, or wiring correctness. Expectations express the
+connections your application says should exist.
+
+For reproducible measurements, run
+`uv run python benchmarks/relationship_graph.py --size 20000 --repeats 5`.
+Add `--db world.db --ref '#0'` to measure the actual CLI with a new temporary
+index cache: initial whole-parse indexing is reported separately from repeated
+indexed outgoing, incoming, batched incoming and fingerprint queries. The
+synthetic fixture has two property edges per object and checks that 100 later
+incoming queries reuse one reverse scan. Output contains counts, all timing
+samples and their median/range. Save benchmark output outside this repository;
+run without concurrent heavy work and report interpreter and dump size.
 
 ### Measuring contents and inheritance trees
 

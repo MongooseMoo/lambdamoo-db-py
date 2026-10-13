@@ -146,6 +146,7 @@ def _db(ctx: click.Context):
             raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
         path, cache = ctx.obj["path"], ctx.obj["cache"]
         ctx.obj["db"] = load(path) if cache is None else open_indexed(path, cache)
+    if "names" not in ctx.obj:
         ctx.obj["names"] = dollar_names(ctx.obj["db"])
     return ctx.obj["db"], ctx.obj["names"]
 
@@ -1014,3 +1015,8 @@ def history(ctx, repo, start, end, from_date, to_date, branch, mode, output_dir,
     except (SourceError, ValueError, OSError) as error:
         _report_failure(ctx, error)
     ctx.exit({'equal':0, 'different':1, 'error':2, 'unknown':3}[manifest['status']])
+
+
+from .graph_cli import register_graph
+
+register_graph(moodb)
