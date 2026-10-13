@@ -10,6 +10,7 @@ through parents in ``db_ancestors()`` order.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import re
 from collections import Counter, deque
 from datetime import datetime, timezone
@@ -42,6 +43,35 @@ ERROR_NAMES = [
     "E_INVIND", "E_RECMOVE", "E_MAXREC", "E_RANGE", "E_ARGS", "E_NACC",
     "E_INVARG", "E_QUOTA", "E_FLOAT", "E_FILE", "E_EXEC", "E_INTRPT",
 ]
+
+
+def code_fingerprint(verb: Verb) -> dict[str, Any]:
+    """Hash exact stored source bytes without returning source or stamp text.
+
+    Dump strings preserve bytes through latin-1. Programs use LF after each
+    stored line, matching FileIO writeline. An absent program differs from an
+    explicitly empty one. Only a recognized UTC editor stamp exposes a date;
+    arbitrary text after its date remains private.
+    """
+    lines = verb.code
+    footer = lines[-1] if lines and lines[-1].startswith('"Last modified ') else None
+    modified_utc = None
+    if footer:
+        match = re.match(r'^"Last modified (\w{3} \w{3} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}) UTC by ', footer)
+        if match:
+            try:
+                stamp_date = datetime.strptime(match[1], "%a %b %d %H:%M:%S %Y")
+                modified_utc = stamp_date.replace(tzinfo=timezone.utc).isoformat()
+            except ValueError:
+                pass
+    source_bytes = "".join(line + "\n" for line in lines).encode("latin-1") if lines is not None else None
+    return {
+        "program_present": lines is not None,
+        "line_count": len(lines) if lines is not None else None,
+        "sha256": hashlib.sha256(source_bytes).hexdigest() if source_bytes is not None else None,
+        "footer_sha256": hashlib.sha256(footer.encode("latin-1")).hexdigest() if footer is not None else None,
+        "modified_utc": modified_utc,
+    }
 
 # db_verbs.cc prep_list; the index is the stored prep value.
 PREPOSITIONS = [

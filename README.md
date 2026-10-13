@@ -18,6 +18,7 @@ export MOODB=world.db          # or pass --db world.db to every command
 moodb info                     # format, object/verb/player/task counts
 moodb obj '$httpd'             # header, flags, ancestry, verbs, own properties
 moodb code '$httpd:GET'        # verb source, found through inheritance
+moodb code --fingerprint '#852:12'  # hashes/counts/stamp date, without source
 moodb prop '$httpd.port'       # effective value, following clear
 moodb grep -C 2 'notify('      # search all verb code
 moodb refs '$httpd'            # who points at #N, in properties and code
@@ -85,6 +86,18 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `graph fingerprint`, `graph audit EXPECTATIONS.json` | snapshot SHA256 and declarative required-connection checks; `graph --overlay FILE` supplies external relation evidence |
 
 Every command exits 1 with a message when a reference does not resolve.
+
+`code --fingerprint SPEC...` returns a JSON array containing each resolved
+defining object, 0-based `index`, 1-based `native_slot`, program presence,
+line count, SHA256 and recognized editor stamp date in UTC. It prints no
+source, object/verb names or arbitrary footer text. Hashes cover exact stored
+latin-1 bytes with LF after every line, including the editor stamp; an absent
+program has null count/hash, while an empty program has zero lines and the
+SHA256 of empty bytes. `footer_sha256` hashes a trailing `"Last modified `
+line without printing it; `modified_utc` is null unless its date has the
+recognized UTC format. These are checkpoint observations, not proof that a
+verb or object retained its identity between checkpoints. `-n` cannot be
+combined with fingerprint output. Ordinary `code` output stays unchanged.
 
 ### Reading relationships sideways
 
