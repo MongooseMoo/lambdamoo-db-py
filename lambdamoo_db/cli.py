@@ -363,7 +363,7 @@ def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerpr
                 raise LookupFailed(f"expected REF or REF:VERB, got {s!r}")
             hit = find_verb(db, o, wanted)
         except LookupFailed as e:
-            raise click.ClickException(str(e))
+            raise click.ClickException("Unresolved code reference" if fingerprint else str(e))
         emit(hit.obj, hit.index, hit.verb)
     if fingerprint:
         click.echo(json.dumps(fingerprints, sort_keys=True))

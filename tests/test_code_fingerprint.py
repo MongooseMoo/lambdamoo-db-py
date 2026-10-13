@@ -4,7 +4,7 @@ import json
 from click.testing import CliRunner
 
 import lambdamoo_db.cli as cli
-from lambdamoo_db.database import MooDatabase, MooObject, ObjNum, Verb
+from lambdamoo_db.database import MooDatabase, MooObject, ObjNum, Property, Verb
 from lambdamoo_db.inspection import code_fingerprint
 
 
@@ -60,3 +60,25 @@ def test_cli_fingerprint_suppresses_private_payload_and_retains_default(monkeypa
     missing = runner.invoke(cli.moodb, ["code", "--fingerprint", "#1:missing"])
     assert missing.exit_code == 1
     assert "PRIVATE_SENTINEL" not in missing.output
+
+
+def test_fingerprint_resolution_errors_never_expose_property_payload(monkeypatch):
+    db = MooDatabase()
+    root = MooObject(0, "root", 0, ObjNum(2), ObjNum(-1))
+    root.properties = [Property("private", "PRIVATE_SENTINEL", 0, 5),
+                       Property("namespace", ObjNum(1), 0, 5)]
+    root.propdefs_count = 2
+    target = MooObject(1, "target", 0, ObjNum(2), ObjNum(-1))
+    target.properties = [Property("private", "PRIVATE_SENTINEL", 0, 5)]
+    target.propdefs_count = 1
+    db.objects = {0: root, 1: target}
+    monkeypatch.setattr(cli, "_db", lambda ctx: (db, {}))
+    runner = CliRunner()
+    for spec in ("$private:0", "#0.private:0", "$namespace.private:0", "#0.namespace.private:0"):
+        result = runner.invoke(cli.moodb, ["code", "--fingerprint", spec])
+        assert result.exit_code == 1
+        assert result.output == "Error: Unresolved code reference\n"
+        assert "PRIVATE_SENTINEL" not in result.output
+        ordinary = runner.invoke(cli.moodb, ["code", spec])
+        assert ordinary.exit_code == 1
+        assert "PRIVATE_SENTINEL" in ordinary.output
