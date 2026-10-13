@@ -209,7 +209,9 @@ needs whole-provider coverage, because an unscanned source may point to the
 target. Complete scope is a claim made by the exporting application; the
 library cannot verify runtime export fidelity. External source labels and
 evidence strings are caller-supplied and printed verbatim: keep secrets out
-of them. Built-in evidence prints only ordinals and typed identities.
+of them. Text output escapes terminal control characters and directionality
+controls; JSON escapes them while preserving the original evidence on decode.
+Built-in evidence prints only ordinals and typed identities.
 
 An expectations file uses this schema:
 

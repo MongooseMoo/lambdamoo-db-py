@@ -428,3 +428,37 @@ def test_cli_rejects_duplicate_json_fields(tmp_path, kind):
     args = ["graph", "--overlay", str(path), "outgoing", "#0"] if kind == "overlay" else ["graph", "audit", str(path)]
     result = run_cli(*args)
     assert result.exit_code == 1 and "cannot read valid UTF-8 JSON" in result.output
+
+
+@pytest.mark.parametrize("command", [
+    ["outgoing", "#0"], ["incoming", "#3"], ["path", "#0", "#3"],
+    ["neighborhood", "#0"], ["dangling"],
+])
+def test_text_graph_escapes_terminal_controls_even_when_color_enabled(tmp_path, command):
+    payload = overlay([edge(source="#0", target="#3"), edge(source="#0", target="#999")])
+    payload["source"] = "producer\x1b[31m\x07\u202e"
+    payload["edges"][0]["evidence"] = ["reason\x1b[31m\r\x9b"]
+    payload["edges"][1]["evidence"] = payload["edges"][0]["evidence"]
+    payload["snapshot_sha256"] = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    path = tmp_path / "controls.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = CliRunner().invoke(moodb, ["--db", str(FIXTURE), "--no-cache", "graph", "--overlay", str(path),
+                                       "--labels", *command, "--kind", "registered"], color=True)
+    assert result.exit_code == 0, result.exception
+    assert not any(c in result.output for c in ("\x1b", "\x07", "\r", "\x9b", "\u202e"))
+    assert "reason\\u001b[31m\\u000d\\u009b" in result.output
+
+
+def test_text_audit_id_controls_are_escaped_and_json_preserves_evidence(tmp_path):
+    payload = requirement(source="#0", target="#3")
+    payload["expectations"][0]["id"] = "expectation\x1b[31m\n\r\x07\u202e"
+    path = tmp_path / "id-controls.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    args = ["--db", str(FIXTURE), "--no-cache", "graph", "audit", str(path)]
+    text_result = CliRunner().invoke(moodb, args, color=True)
+    assert text_result.exit_code in (0, 1)
+    assert "expectation\\u001b[31m\\u000a\\u000d\\u0007\\u202e" in text_result.output
+    assert not any(c in text_result.output for c in ("\x1b", "\x07", "\r", "\u202e"))
+    json_result = CliRunner().invoke(moodb, args + ["--format", "json"], color=True)
+    assert json.loads(json_result.output)["expectations"][0]["id"] == payload["expectations"][0]["id"]
+    assert "\x1b" not in json_result.output

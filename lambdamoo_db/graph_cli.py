@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from .lazy import open_indexed
+from .diff_report import _terminal
 from .reader import load
 from .relationship_graph import BUILTIN_KINDS, Node, RelationshipGraph, parse_node
 
@@ -112,30 +113,32 @@ def register_graph(moodb):
         if format == "json":
             click.echo(json.dumps(result, sort_keys=True))
             return
+        def echo(value):
+            click.echo(_terminal(value))
         def identity(value):
             return str(Node(value["type"], value["id"]))
         if "expectations" in result:
             for requirement in result["expectations"]:
-                click.echo(f"{requirement['id']}: {requirement['status']}")
+                echo(f"{requirement['id']}: {requirement['status']}")
         elif "snapshot_sha256" in result:
-            click.echo(result["snapshot_sha256"])
+            echo(result["snapshot_sha256"])
         elif "dangling" in result:
             for category in ("dangling", "special", "type_mismatch"):
-                click.echo(f"{category}: {len(result[category])} references")
+                echo(f"{category}: {len(result[category])} references")
                 for edge in result[category]:
-                    click.echo(f"  {identity(edge['source'])} --{edge['kind']}--> {identity(edge['target'])} [{'/'.join(edge['evidence'])}]")
+                    echo(f"  {identity(edge['source'])} --{edge['kind']}--> {identity(edge['target'])} [{'/'.join(edge['evidence'])}]")
         else:
             if "status" in result:
-                click.echo(f"{result['status']}; {len(result.get('nodes', []))} nodes; {len(result['edges'])} edges")
+                echo(f"{result['status']}; {len(result.get('nodes', []))} nodes; {len(result['edges'])} edges")
             for edge in result.get("path", result.get("edges", [])) if result.get("target") else result.get("edges", []):
                 holder = f"; value from {identity(edge['value_from'])}" if edge.get("value_from") else ""
-                click.echo(f"{identity(edge['source'])} --{edge['kind']}--> {identity(edge['target'])} [{'/'.join(edge['evidence'])}; {edge['provenance']}{holder}]")
+                echo(f"{identity(edge['source'])} --{edge['kind']}--> {identity(edge['target'])} [{'/'.join(edge['evidence'])}; {edge['provenance']}{holder}]")
                 if edge.get("labels"):
-                    click.echo("  labels: " + json.dumps(edge["labels"], ensure_ascii=True, sort_keys=True))
+                    echo("  labels: " + json.dumps(edge["labels"], ensure_ascii=True, sort_keys=True))
             if result.get("truncated"):
-                click.echo("truncated: " + ", ".join(result["truncated"]))
+                echo("truncated: " + ", ".join(result["truncated"]))
             if result.get("coverage_complete") is False:
-                click.echo("relationship coverage is incomplete")
+                echo("relationship coverage is incomplete")
 
     def common(function):
         function = click.option("--format", "format", type=click.Choice(["text", "json"]), default="text")(function)
