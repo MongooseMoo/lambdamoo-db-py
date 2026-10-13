@@ -130,9 +130,9 @@ def moodb(ctx: click.Context, db_path: str | None, no_cache: bool, cache_dir: st
     each record is. Later queries read only the records they need. `batch`
     answers several queries in one run.
     """
-    if ctx.invoked_subcommand in ('history', 'diff-read'):
+    if ctx.invoked_subcommand in ('history', 'diff-read', 'history-read'):
         if ctx.get_parameter_source('db_path') == click.core.ParameterSource.COMMANDLINE:
-            raise click.UsageError('--db is not used by history or diff-read')
+            raise click.UsageError('--db is not used by history, diff-read or history-read')
         db_path = None
     elif ctx.invoked_subcommand != 'diff' and db_path is not None:
         db_path = click.Path(exists=True, dir_okay=False).convert(db_path, None, ctx)
@@ -925,6 +925,47 @@ def diff_read(ctx, bundle, event, object_id, category, offset, limit, side, valu
         click.echo(canonical_json(result).decode('utf-8'))
     except (ValueError, OSError) as error:
         _report_failure(ctx, error)
+
+
+@moodb.command('history-read')
+@click.argument('bundle', type=click.Path(file_okay=False))
+@click.option('--object', 'object_id', default=None, help='Permanent numeric slot, e.g. #852.')
+@click.option('--target', default=None, help='Permanent numeric reference target; tagged object values only.')
+@click.option('--category', type=click.Choice(['code','definitions','values','heap','runtime','serialization']), default=None)
+@click.option('--section', 'sections', multiple=True,
+              type=click.Choice(['objects','properties','verbs','heap','players','recycled','runtime','serialization']))
+@click.option('--kind', 'kinds', multiple=True,
+              type=click.Choice(['added','removed','changed','type_changed','order_changed','identity_conflict','identity_unresolved']))
+@click.option('--property', 'property_name', default=None, help='Case-insensitive stored property name in either path.')
+@click.option('--path-prefix', default=None, help='JSON array of typed path steps, matched on either side.')
+@click.option('--direction', type=click.Choice(['forward','backward']), default='forward', show_default=True)
+@click.option('--offset', type=click.IntRange(min=0), default=0, show_default=True)
+@click.option('--limit', type=click.IntRange(min=1), default=50, show_default=True)
+@click.option('--max-scan-events', type=click.IntRange(min=1), default=100000, show_default=True)
+@click.option('--max-scan-edges', type=click.IntRange(min=1), default=1000, show_default=True)
+@click.option('--format', 'output_format', type=click.Choice(['text','json']), default='text', show_default=True)
+@click.pass_context
+def history_read(ctx, bundle, object_id, target, category, sections, kinds, property_name, path_prefix,
+                 direction, offset, limit, max_scan_events, max_scan_edges, output_format):
+    """Trace stored transition evidence and coverage without reopening dumps.
+
+    Text prints locators and coverage. JSON includes the stored typed events.
+    Search limits bound interrogation; authentication still checks all files.
+    """
+    from .diff_types import canonical_json
+    from .diff_report import _json
+    from .history_read import query_history, render_history_query
+    try:
+        result = query_history(bundle, object_id=object_id, target=target, category=category,
+                               sections=sections, kinds=kinds, property_name=property_name,
+                               path_prefix=_json(path_prefix) if path_prefix is not None else None,
+                               direction=direction, offset=offset, limit=limit,
+                               max_scan_events=max_scan_events, max_scan_edges=max_scan_edges)
+        click.echo(canonical_json(result).decode('utf-8') if output_format == 'json' else render_history_query(result))
+    except (ValueError, OSError, KeyError, TypeError, RecursionError) as error:
+        _report_failure(ctx, error)
+    if not result['coverage']['query_scan_complete']:
+        ctx.exit(2)
 
 
 @moodb.command('history')

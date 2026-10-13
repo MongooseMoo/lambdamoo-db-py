@@ -380,7 +380,101 @@ checkpoint time remains unknown without recognized backup metadata.
 into a new output directory. Caught errors and user interrupts retain the
 verified completed prefix with covered and requested endpoints and exit 2.
 Existing destinations are refused. History and
-diff-read ignore `MOODB` and reject an explicit global `--db`.
+diff-read and history-read ignore `MOODB` and reject an explicit global `--db`.
+
+### Trace relationships through checkpoints
+
+`history-read` interrogates an existing history bundle without opening its
+source dumps or consulting Git. For a useful change timeline, build the bundle
+with `history --mode adjacent`: endpoint comparisons can hide a changed and
+then reverted connection, or an object removed and recreated in the same slot.
+
+```sh
+moodb history-read review-timeline --object '#852'
+moodb history-read review-timeline --object '#852' --target '#410' --property systems
+moodb history-read review-timeline --target '#410' --section properties --direction backward
+moodb history-read review-timeline --object '#852' --category code --limit 20 --offset 20
+moodb history-read review-timeline --object '#852' --format json
+moodb history-read review-timeline --max-scan-events 10000 --max-scan-edges 100
+```
+
+Object selectors and targets are permanent numeric slots, not `$names` whose
+meaning can change across checkpoints. `--target` answers where stored typed
+object-reference evidence appeared, disappeared, or remained present while
+other data changed. Each match reports old and new presence separately:
+`present -> absent`, `absent -> present`, or `present -> present`. A number,
+string, verb-code mention or heap ID is not a permanent object reference.
+Object-valued map keys count; integer keys with the same number do not. Target
+queries resolve complete externalized payloads and reachable anonymous/waif
+nodes, including cyclic heaps. They report stored evidence, not a call made by
+the running server. Unavailable or concealed reference evidence yields
+`unknown`, including possibly matching concealed events. It cannot establish
+that a reference was absent. Presence describes the changed payload or path,
+not a reconstructed complete object state; a reference elsewhere on the object
+may still exist.
+
+`--property NAME` matches a stored property step on either event path, ignoring
+ASCII case. Repeat `--section` and `--kind` to select events. `--path-prefix`
+accepts a JSON array of exact typed steps from an event's old or new path; copy
+that array from JSON output to select a precise definition or nested location.
+Concealed coordinates remain possibly matching events with `selector_match:
+unknown`. Lifecycle states are retained in each searched transition even when
+the property/category filter selects other events. No identity is inferred
+from a property-name spelling or an anonymous dump number.
+
+Text output prints transition commits, event and edge IDs, safe property/field
+locators, reference presence and coverage. It does not print property values,
+source or arbitrary map-key strings. Explicit `--format json` returns stored
+typed events, their complete paths and payload locators. Retrieve a payload
+with `diff-read review-timeline --edge EDGE_ID --event EVENT_ID --side old
+--range START:END`. Each transition keeps its own evidence: change and revert
+events are never collapsed. `--direction backward` searches the latest
+transitions first; within one transition event order reverses too, without
+claiming an order of actions between the two checkpoints.
+
+Pages bound returned events (`--limit`, default 50). `next_offset` tells the
+caller where the next page starts; each page is a fresh query. Searches are
+bounded separately by `--max-scan-events` (default 100000) and
+`--max-scan-edges` (default 1000). A bound reports a lower-bound match count,
+`query_scan_complete: false`, a coverage gap and exit 2. Raise the bound to
+reach later pages; a display offset cannot bypass the scan cap. Successful
+queries exit 0; invalid evidence exits 2. A successful query can still describe
+an incomplete source history: inspect coverage before interpreting no matches.
+
+Coverage lists failed comparisons, endpoint-only unobserved intervals,
+unreached requested endpoints, omitted merge parents, unknown identity,
+truncated details, filtered event kinds, selected object/section/view scope,
+concealed evidence and query bounds. Complete authentication proves the report
+is internally consistent with its digests and typed evidence; it is not an
+external signature or proof of a complete history. Numeric slot continuity
+remains `unknown`: two observed `#852` records do not prove one continuous
+object incarnation. An edge union across time does not prove a route existed
+at any one checkpoint, a time-respecting route, causality, or who changed the
+connection. Commit metadata is checkpoint provenance, not attribution.
+
+The API is `lambdamoo_db.history_read.query_history(path, object_id=852,
+target=410, limit=50)`. It authenticates the complete history and each pair
+once per query, consumes one pair at a time, caches resolved target payloads
+within that pair, and keeps a bounded output page. Search caps bound event
+interrogation, not mandatory authentication I/O or the size of one pair. The
+existing pair validator still materializes one pair's event stream; this API
+does not promise a memory cap for an arbitrarily large pair. Repeated
+`diff-read` calls authenticate the history and selected pair again on every
+retrieval; `history-read` avoids that multiplicative validation cost when
+tracing many transitions. Dumps and benchmark/report artifacts belong outside
+commits.
+
+Reproduce the synthetic reader benchmark in a new directory outside the checkout:
+
+```sh
+uv run python benchmarks/history_read.py /path/outside/checkout/trace-benchmark --rounds 10 --edges 8 --width 40
+```
+
+It checks that both retrieval methods return the same event IDs, alternates
+execution order, and reports every timing sample, median, pair-validation
+count and a separate `tracemalloc` peak. That peak measures Python allocations,
+not resident memory. The synthetic workload changes and reverts integer map
+values; it does not establish performance on a large Mongoose history.
 
 Optional redaction uses a declarative JSON file:
 
