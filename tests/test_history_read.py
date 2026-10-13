@@ -244,6 +244,7 @@ def test_default_text_does_not_print_map_key_strings_or_terminal_controls(histor
     assert 'map key type string' in text
     for event in result['events']:
         event['event']['old_path'][0]['name'] = 'control\x1b[31m'
+    result['old_commit'] = 'untrusted\x1b[31m'
     assert '\x1b' not in render_history_query(result)
 
 

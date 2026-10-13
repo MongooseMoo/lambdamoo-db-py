@@ -303,4 +303,4 @@ def render_history_query(result):
         lines.append('Coverage gap: ' + reason)
     if coverage['next_offset'] is not None:
         lines.append(f"Next page: --offset {coverage['next_offset']}")
-    return '\n'.join(lines)
+    return '\n'.join(_terminal(line) for line in lines)
