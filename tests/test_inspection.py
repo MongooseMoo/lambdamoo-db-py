@@ -692,6 +692,11 @@ def test_cli_new_commands():
     assert lines[0] == '#0 $sysobj "The System Object".string_utils'
     assert any(":[0] do_login_command:15: " in line for line in lines)
 
+    r = run("refs", "$string_utils", "$seq_utils")
+    many = r.output.splitlines()
+    assert many[0] == "== $string_utils" and many[1 : 1 + len(lines)] == lines
+    assert many[1 + len(lines)] == "== $seq_utils"
+
     r = run("children", "$generic_utils")
     assert '#20 $string_utils "string utilities"' in r.output
     assert run("children", "-r", "1").output.count("\n") > run("children", "1").output.count("\n")
