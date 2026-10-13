@@ -24,7 +24,8 @@ def _json_file(path, value):
 
 
 def _rows(path):
-    return [json.loads(line) for line in path.read_bytes().splitlines()]
+    from .diff_report import _json
+    return [_json(line) for line in path.read_bytes().splitlines()]
 
 
 def _linked(path):
@@ -36,6 +37,8 @@ def _linked(path):
 
 
 def _safe_file(root, name):
+    if _linked(root):
+        raise ValueError('History root cannot be a link')
     if not isinstance(name, str) or not name or '\\' in name or ':' in name:
         raise ValueError('Invalid history artifact path')
     parsed = PurePosixPath(name)
@@ -51,14 +54,20 @@ def _safe_file(root, name):
     return path
 
 
-def validate_history(path):
-    """Authenticate every advertised artifact and each successful pair."""
-    from .diff_report import validate_bundle
+def validate_history(path, *, _consume_pair=None, _prepare_query=None, _reverse_pairs=False):
+    """Authenticate every advertised artifact and each successful pair.
+
+    A reader can consume each authenticated pair before it is released, rather
+    than holding every pair in memory or revalidating one for every event.
+    The consumer's output must not be published until this function returns.
+    """
+    from .diff_report import load_bundle, validate_bundle
     root = Path(path)
     if _linked(root):
         raise ValueError('History root cannot be a link')
     try:
-        manifest = json.loads(_safe_file(root, 'manifest.json').read_bytes())
+        from .diff_report import _json
+        manifest = _json(_safe_file(root, 'manifest.json').read_bytes())
         if not isinstance(manifest, dict) or manifest.get('schema_version') != 1 or manifest.get('report_type') != 'history' or manifest.get('complete') is not True:
             raise ValueError('Incomplete or unsupported history manifest')
         if not isinstance(manifest.get('files'), dict) or 'edges.jsonl' not in manifest['files'] or 'objects.jsonl' not in manifest['files']:
@@ -72,7 +81,6 @@ def validate_history(path):
             raise ValueError('History edge inventory mismatch')
         seen = set()
         previous_commit = manifest['old_commit']
-        pair_footers = []
         for edge in edges:
             identity = edge['edge_id']
             if identity in seen or not isinstance(identity, str) or len(identity) != 64 or any(c not in '0123456789abcdef' for c in identity):
@@ -81,11 +89,19 @@ def validate_history(path):
             if edge['old_commit'] != previous_commit:
                 raise ValueError('History edge chain is discontinuous')
             previous_commit = edge['new_commit']
+        if previous_commit != manifest['new_commit']:
+            raise ValueError('History endpoints differ from its edge chain')
+        if _prepare_query:
+            _prepare_query(manifest, edges)
+        pair_footers = []
+        for edge in reversed(edges) if _reverse_pairs else edges:
+            identity = edge['edge_id']
             if edge['status'] != 'error' or edge.get('bundle'):
                 expected = 'edges/' + identity
                 if edge.get('bundle') != expected:
                     raise ValueError('Invalid history edge bundle path')
-                pair = validate_bundle(root / expected)
+                loaded = load_bundle(root / expected) if _consume_pair else None
+                pair = loaded[1] if loaded else validate_bundle(root / expected)
                 header = pair['header']
                 footer = pair['footer']
                 calculated = _digest(canonical_json({'old_commit': edge['old_commit'], 'new_commit': edge['new_commit'],
@@ -107,13 +123,15 @@ def validate_history(path):
                 if actual_options != expected_options or header.get('policy_version') != semantic['policy_version'] or header.get('redaction',{}).get('policy_sha256') != semantic['redaction_policy']:
                     raise ValueError('History semantic options differ from its pair bundle')
                 pair_footers.append(footer)
+                if _consume_pair:
+                    _consume_pair(edge, loaded)
+                # Do not retain the preceding pair while loading the next.
+                loaded = None
             else:
                 calculated = _digest(canonical_json({'old_commit':edge['old_commit'],'new_commit':edge['new_commit'],'failed':True}))
                 if calculated != identity or edge.get('scan_complete') is not False or edge.get('identity_complete') is not False:
                     raise ValueError('Invalid failed history edge')
                 pair_footers.append({'status':'error','scan_complete':False,'identity_complete':False,'details_complete':False,'payloads_complete':False})
-        if previous_commit != manifest['new_commit']:
-            raise ValueError('History endpoints differ from its edge chain')
         statuses = [row['status'] for row in pair_footers]
         status = 'error' if manifest.get('errors') or 'error' in statuses else 'different' if 'different' in statuses else 'unknown' if 'unknown' in statuses else 'equal'
         if manifest.get('status') != status:

@@ -630,11 +630,21 @@ def _load_bundle(path):
     return root, manifest, rows, event_spans
 
 
-def validate_bundle(path):
+def load_bundle(path):
+    """Authenticate a pair once and return its manifest, index and event spans.
+
+    Consumers can interrogate many events without validating the whole bundle
+    for every retrieval. The returned evidence retains payload locators; use
+    the existing resolver when complete tagged values are needed.
+    """
     try:
-        return _load_bundle(path)[1]
+        return _load_bundle(path)
     except (KeyError, TypeError, AttributeError, OSError, RecursionError):
         raise ReportError('invalid or incomplete bundle') from None
+
+
+def validate_bundle(path):
+    return load_bundle(path)[1]
 
 
 def _selector(value, rows):
