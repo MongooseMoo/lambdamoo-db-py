@@ -702,6 +702,14 @@ def test_cli_new_commands():
     assert lines[0] not in code
     assert lines[len(lines) - len(code):] == code
 
+    r = run("compare-verbs", "$string_utils", "$string_utils")
+    assert r.exit_code == 0
+    last = r.output.splitlines()[-1]
+    assert last.startswith("same ") and last.endswith("differs 0  missing 0  only-b 0")
+    r = run("compare-verbs", "-q", "$string_utils", "$seq_utils")
+    assert "missing  #20:[0] " in r.output and "only-b   #33:contract" in r.output
+    assert r.output.splitlines()[-1] == "same 0  differs 1  missing 78  only-b 20"
+
     r = run("children", "$generic_utils")
     assert '#20 $string_utils "string utilities"' in r.output
     assert run("children", "-r", "1").output.count("\n") > run("children", "1").output.count("\n")

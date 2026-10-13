@@ -354,6 +354,57 @@ def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool) -> None:
         _print_program(db, names, hit.obj, hit.index, hit.verb, line_numbers)
 
 
+def _program_body(v) -> list[str]:
+    """A verb's code without the trailing `"Last modified ..."` stamp the verb editor adds."""
+    lines = list(v.code or [])
+    while lines and lines[-1].startswith('"Last modified '):
+        lines.pop()
+    return lines
+
+
+@moodb.command("compare-verbs")
+@click.argument("a")
+@click.argument("b")
+@click.option("-q", "--quiet", is_flag=True, help="Only the one-line verdict for each verb, no diff.")
+@click.pass_context
+def compare_verbs(ctx: click.Context, a: str, b: str, quiet: bool) -> None:
+    """Compare the verbs A defines with B's verbs of the same names, in one dump.
+
+    For checking a move or copy of verbs from one object to another. Each
+    verb A defines is `same`, `differs` (with a unified diff) or `missing`
+    on B; verbs only B defines are listed last. The verb editor's trailing
+    "Last modified" line is ignored. Ends with the counts.
+    """
+    import difflib
+
+    db, _ = _db(ctx)
+    oa, ob = _object(db, a), _object(db, b)
+    theirs: dict[str, list] = {}
+    for v in ob.verbs:
+        theirs.setdefault(v.name, []).append(v)
+    counts: Counter[str] = Counter()
+    for idx, v in enumerate(oa.verbs):
+        other = theirs.get(v.name, [])
+        match = other.pop(0) if other else None
+        first = v.name.split(" ")[0]
+        if match is None:
+            verdict = "missing"
+        elif _program_body(v) == _program_body(match):
+            verdict = "same"
+        else:
+            verdict = "differs"
+        counts[verdict] += 1
+        click.echo(f"{verdict:8} #{oa.id}:[{idx}] {first}")
+        if verdict == "differs" and not quiet:
+            for line in difflib.unified_diff(_program_body(v), _program_body(match), f"#{oa.id}:{first}", f"#{ob.id}:{first}", lineterm="", n=1):
+                click.echo("    " + line)
+    for name, left in theirs.items():
+        for _v in left:
+            counts["only-b"] += 1
+            click.echo(f"only-b   #{ob.id}:{name.split(' ')[0]}")
+    click.echo("  ".join(f"{k} {counts[k]}" for k in ("same", "differs", "missing", "only-b")))
+
+
 @moodb.command()
 @click.argument("spec", nargs=-1, required=True)
 @click.option("--full", is_flag=True, help="Do not truncate long values.")
