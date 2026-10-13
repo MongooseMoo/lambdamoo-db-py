@@ -17,6 +17,7 @@ from .inspection import (
     all_properties,
     answers_call,
     builtin_value,
+    code_fingerprint,
     defined_property_names,
     descendants,
     dollar_names,
@@ -330,28 +331,42 @@ def _print_program(db, names, o, idx: int, v, line_numbers: bool) -> None:
 @moodb.command()
 @click.argument("spec", nargs=-1, required=True)
 @click.option("-n", "--line-numbers", is_flag=True, help="Number the code lines.")
+@click.option("--fingerprint", is_flag=True, help="Print JSON hashes, line counts and recognized UTC stamp dates, without source text.")
 @click.pass_context
-def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool) -> None:
+def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerprint: bool) -> None:
     """Print verb code: `code '$httpd:GET' 852:12`. A bare REF prints every verb on it.
 
     Verbs are found on the object or its ancestors; the header names the
     object that defines the verb.
     """
+    if fingerprint and line_numbers:
+        raise click.UsageError("--fingerprint cannot be combined with --line-numbers")
     db, names = _db(ctx)
+    fingerprints = []
+
+    def emit(o, idx, v):
+        if fingerprint:
+            fingerprints.append({"object": o.id, "index": idx, "native_slot": idx + 1,
+                                 **code_fingerprint(v)})
+        else:
+            _print_program(db, names, o, idx, v, line_numbers)
+
     for s in spec:
         try:
             ref, separator, wanted = s.partition(":")
             o = resolve_object(db, ref)
             if not separator:
                 for idx, v in enumerate(o.verbs):
-                    _print_program(db, names, o, idx, v, line_numbers)
+                    emit(o, idx, v)
                 continue
             if not wanted:
                 raise LookupFailed(f"expected REF or REF:VERB, got {s!r}")
             hit = find_verb(db, o, wanted)
         except LookupFailed as e:
-            raise click.ClickException(str(e))
-        _print_program(db, names, hit.obj, hit.index, hit.verb, line_numbers)
+            raise click.ClickException("Unresolved code reference" if fingerprint else str(e))
+        emit(hit.obj, hit.index, hit.verb)
+    if fingerprint:
+        click.echo(json.dumps(fingerprints, sort_keys=True))
 
 
 def _program_body(v) -> list[str]:
