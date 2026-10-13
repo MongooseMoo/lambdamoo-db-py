@@ -592,14 +592,20 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
 
 
 @moodb.command()
-@click.argument("ref")
+@click.argument("ref", nargs=-1, required=True)
 @click.pass_context
-def refs(ctx: click.Context, ref: str) -> None:
-    """Find references to an object: property values holding it, and verb code naming #N or its $name."""
+def refs(ctx: click.Context, ref: tuple[str, ...]) -> None:
+    """Find references to an object: property values holding it, and verb code naming #N or its $name.
+
+    Several REFs are answered in one run, each under an `== REF` line.
+    """
     db, names = _db(ctx)
-    target = _object(db, ref)
-    for r in find_references(db, target, names):
-        click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {r.text}" if r.text else ""))
+    targets = [_object(db, one) for one in ref]
+    for one, target in zip(ref, targets):
+        if len(ref) > 1:
+            click.echo(f"== {one}")
+        for r in find_references(db, target, names):
+            click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {r.text}" if r.text else ""))
 
 
 @moodb.command()
