@@ -593,8 +593,9 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
 
 @moodb.command()
 @click.argument("ref", nargs=-1, required=True)
+@click.option("--code", "code_only", is_flag=True, help="Only verb code naming it; leave out property values holding it.")
 @click.pass_context
-def refs(ctx: click.Context, ref: tuple[str, ...]) -> None:
+def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool) -> None:
     """Find references to an object: property values holding it, and verb code naming #N or its $name.
 
     Several REFs are answered in one run, each under an `== REF` line.
@@ -605,6 +606,8 @@ def refs(ctx: click.Context, ref: tuple[str, ...]) -> None:
         if len(ref) > 1:
             click.echo(f"== {one}")
         for r in find_references(db, target, names):
+            if code_only and not r.where.startswith(":["):
+                continue
             click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {r.text}" if r.text else ""))
 
 

@@ -697,6 +697,11 @@ def test_cli_new_commands():
     assert many[0] == "== $string_utils" and many[1 : 1 + len(lines)] == lines
     assert many[1 + len(lines)] == "== $seq_utils"
 
+    code = run("refs", "--code", "$string_utils").output.splitlines()
+    assert code and len(code) < len(lines)
+    assert lines[0] not in code
+    assert lines[len(lines) - len(code):] == code
+
     r = run("children", "$generic_utils")
     assert '#20 $string_utils "string utilities"' in r.output
     assert run("children", "-r", "1").output.count("\n") > run("children", "1").output.count("\n")
