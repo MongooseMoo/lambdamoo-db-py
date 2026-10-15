@@ -99,6 +99,39 @@ recognized UTC format. These are checkpoint observations, not proof that a
 verb or object retained its identity between checkpoints. `-n` cannot be
 combined with fingerprint output. Ordinary `code` output stays unchanged.
 
+### Reading mailing lists and mailboxes
+
+```sh
+moodb mail lists changelog                 # find non-player recipients by name
+moodb mail headers '#2667' --tail 30        # recent subjects and stored numbers
+moodb mail read '#2667' 1-20               # inclusive message-number range
+moodb mail read '#2667' 3,8-12             # selected numbers/ranges, stored order
+moodb mail read '#2667' --search 'door'     # literal, case-insensitive, headers + body
+moodb mail read '$changelog_fo.changelog' --tail 10 --format json
+moodb batch 'mail headers #2667 --tail 5' 'mail read #2667 3'
+```
+
+`mail read REF [SEQUENCE]` prints complete bodies, blank lines and additional
+headers. `mail headers` omits bodies. Both default to `all`; `--search` filters
+before `--tail N` selects the last N matches. Numbers come from the mailbox,
+not list positions: deleted gaps remain gaps. A wholly absent number/range is
+an error; a search with no matches succeeds with zero results. Numbers identify
+messages within this snapshot; the live MOO can renumber a mailbox.
+
+The Python API is `read_mailbox(db, obj)` and `select_messages(...)` in
+`lambdamoo_db.mail`, returning `MailMessage` records. The reader supports the
+LambdaCore flat `.messages` format and `$big_mail_recipient` property trees,
+follows inherited values, and reads only active mail. It validates tree counts,
+rejects repeated/cyclic nodes and malformed records, and never evaluates verbs.
+Custom mail stores and external/disk-only archives are not interpreted.
+
+`mail lists [PATTERN]` walks `$mail_recipient` descendants and excludes player
+objects unless `--include-players` is given. Use `--root REF` for another
+recipient hierarchy. Discovery prints names and numbers only. Reading is an
+explicit offline data inspection: possession of a dump bypasses live mailbox
+permissions. Select only the mail relevant to the task; message contents and
+names can be private. JSON dates are original Unix timestamps; text uses UTC.
+
 ### Reading relationships sideways
 
 ```sh
