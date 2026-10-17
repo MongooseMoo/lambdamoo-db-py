@@ -602,7 +602,7 @@ FIELD_COVERAGE = {
     },
     MooObject: {
         'id': 'identity', 'name': 'objects', 'flags': 'objects', 'owner': 'objects', 'location': 'objects',
-        'parents': 'objects', 'children': 'objects', 'last_move': 'objects', 'contents': 'objects',
+        'parents': 'objects', 'parents_listed': 'serialization', 'children': 'objects', 'last_move': 'objects', 'contents': 'objects',
         'verbs': 'verbs', 'properties': 'properties', 'propdefs_count': 'properties', 'anon': 'identity',
         'v4_blank_line': 'serialization', 'v4_first_content': 'serialization', 'v4_neighbor': 'serialization',
         'v4_first_child': 'serialization', 'v4_sibling': 'serialization',

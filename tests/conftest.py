@@ -53,12 +53,9 @@ def toaststunt_dir() -> Path:
 
 
 @pytest.fixture
-def toastcore_db_path(toaststunt_dir) -> Path:
-    """Path to toaststunt's v17 toastcore.db."""
-    path = toaststunt_dir / "toastcore.db"
-    if not path.exists():
-        pytest.skip(f"toastcore.db not found at {path}")
-    return path
+def toastcore_db_path() -> Path:
+    """Path to the v17 toastcore.db written by ToastStunt, tracked in this repository."""
+    return PROJECT_ROOT / "toastcore.db"
 
 
 @pytest.fixture

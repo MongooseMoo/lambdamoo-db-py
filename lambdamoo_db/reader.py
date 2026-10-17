@@ -447,12 +447,14 @@ class Reader:
         contents = self.readValue(db)
         logger.debug("  read contents")
         parents = self.readValue(db)
-        if not isinstance(parents, list):
+        parents_listed = isinstance(parents, list)
+        if not parents_listed:
             parents = [parents]
         logger.debug("  read parents")
         children = self.readValue(db)
         logger.debug("  read children")
         obj = MooObject(oid, name, flags, owner, location, parents)
+        obj.parents_listed = parents_listed
         obj.last_move = last_move
         obj.contents = contents
         obj.children = children

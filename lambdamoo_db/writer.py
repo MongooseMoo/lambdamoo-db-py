@@ -10,7 +10,6 @@ from lambdamoo_db.enums import DBVersions, MooTypes
 from . import templates
 from .database import (
     CLEAR,
-    TYPE_MAPPING,
     VM,
     Activation,
     Anon,
@@ -68,38 +67,66 @@ class Writer:
     def writeBool(self, b: bool) -> None:
         self.writeInt(1 if b else 0)
 
+    @staticmethod
+    def valueType(v: Any) -> MooTypes:
+        """The type tag ToastStunt's dbio_write_var writes for a value."""
+        if isinstance(v, bool):
+            return MooTypes.BOOL
+        if isinstance(v, MooError):
+            return MooTypes.ERR
+        if isinstance(v, MooCatch):
+            return MooTypes._CATCH
+        if isinstance(v, MooFinally):
+            return MooTypes._FINALLY
+        if isinstance(v, ObjNum):
+            return MooTypes.OBJ
+        if isinstance(v, Anon):
+            return MooTypes.ANON
+        if isinstance(v, int):
+            return MooTypes.INT
+        if isinstance(v, str):
+            return MooTypes.STR
+        if isinstance(v, float):
+            return MooTypes.FLOAT
+        if isinstance(v, list):
+            return MooTypes.LIST
+        if isinstance(v, dict):
+            return MooTypes.MAP
+        if isinstance(v, Clear):
+            return MooTypes.CLEAR
+        if v is None:
+            return MooTypes.NONE
+        if isinstance(v, WaifReference):
+            return MooTypes.WAIF
+        if isinstance(v, SupportsInt):
+            return MooTypes.INT
+        raise TypeError(f"Unsupported value type: {type(v).__name__}")
+
     def writeRawValue(self, v: Any) -> None:
         """Write a value without type tag (just the raw data)."""
-        if isinstance(v, bool):
+        moo_type = self.valueType(v)
+        if moo_type == MooTypes.BOOL:
             self.writeBool(v)
             self.write(self._nl)
-        elif isinstance(v, MooError):
-            self.writeInt(v)
-            self.write(self._nl)
-        elif isinstance(v, ObjNum):
+        elif moo_type == MooTypes.OBJ:
             self.writeObj(v)
             self.write(self._nl)
-        elif isinstance(v, int):
-            self.writeInt(v)
-            self.write(self._nl)
-        elif isinstance(v, str):
+        elif moo_type == MooTypes.STR:
             self.writeString(v)
-        elif isinstance(v, float):
+        elif moo_type == MooTypes.FLOAT:
             self.writeFloat(v)
             self.write(self._nl)
-        elif isinstance(v, list):
+        elif moo_type == MooTypes.LIST:
             self.writeListContents(v)
-        elif isinstance(v, dict):
+        elif moo_type == MooTypes.MAP:
             self.writeMapContents(v)
-        elif isinstance(v, Clear):
-            pass  # CLEAR has no value
-        elif v is None:
-            pass  # NONE has no value
-        elif isinstance(v, SupportsInt):
-            self.writeInt(v)
+        elif moo_type in (MooTypes.CLEAR, MooTypes.NONE):
+            pass  # no value follows the tag
+        elif moo_type == MooTypes.WAIF:
+            self.writeWaif(v)
+        else:  # INT, ERR, ANON, _CATCH, _FINALLY: a number
+            self.writeInt(int(v))
             self.write(self._nl)
-        else:
-            raise TypeError(f"Unsupported value type: {type(v).__name__}")
 
     def writeListContents(self, lst: list[Any]) -> None:
         """Write list contents without type tag (count + items)."""
@@ -181,91 +208,9 @@ class Writer:
 
     def writeValue(self, v: Any) -> None:
         """Write a type-tagged value (type tag on its own line, then value)."""
-        # Determine type tag
-        if isinstance(v, bool):
-            logger.debug(f"  Writing [TYPE_BOOL] = {v}")
-            self.writeInt(MooTypes.BOOL)
-            self.write(self._nl)
-            self.writeBool(v)
-            self.write(self._nl)
-        elif isinstance(v, MooError):
-            logger.debug(f"  Writing [TYPE_ERR] = {v}")
-            self.writeInt(MooTypes.ERR)
-            self.write(self._nl)
-            self.writeInt(v)
-            self.write(self._nl)
-        elif isinstance(v, MooCatch):
-            logger.debug(f"  Writing [TYPE_CATCH] = {v}")
-            self.writeInt(MooTypes._CATCH)
-            self.write(self._nl)
-            self.writeInt(int(v))
-            self.write(self._nl)
-        elif isinstance(v, MooFinally):
-            logger.debug(f"  Writing [TYPE_FINALLY] = {v}")
-            self.writeInt(MooTypes._FINALLY)
-            self.write(self._nl)
-            self.writeInt(int(v))
-            self.write(self._nl)
-        elif isinstance(v, ObjNum):
-            logger.debug(f"  Writing [TYPE_OBJ] = #{v}")
-            self.writeInt(MooTypes.OBJ)
-            self.write(self._nl)
-            self.writeObj(v)
-            self.write(self._nl)
-        elif isinstance(v, Anon):
-            logger.debug(f"  Writing [TYPE_ANON] = {v}")
-            self.writeInt(MooTypes.ANON)
-            self.write(self._nl)
-            self.writeInt(int(v))
-            self.write(self._nl)
-        elif isinstance(v, int):
-            logger.debug(f"  Writing [TYPE_INT] = {v}")
-            self.writeInt(MooTypes.INT)
-            self.write(self._nl)
-            self.writeInt(v)
-            self.write(self._nl)
-        elif isinstance(v, str):
-            logger.debug(f"  Writing [TYPE_STR] = {v!r}")
-            self.writeInt(MooTypes.STR)
-            self.write(self._nl)
-            self.writeString(v)
-        elif isinstance(v, float):
-            logger.debug(f"  Writing [TYPE_FLOAT] = {v}")
-            self.writeInt(MooTypes.FLOAT)
-            self.write(self._nl)
-            self.writeFloat(v)
-            self.write(self._nl)
-        elif isinstance(v, list):
-            logger.debug(f"  Writing [TYPE_LIST] count={len(v)}")
-            self.writeInt(MooTypes.LIST)
-            self.write(self._nl)
-            self.writeListContents(v)
-        elif isinstance(v, dict):
-            logger.debug(f"  Writing [TYPE_MAP] count={len(v)}")
-            self.writeInt(MooTypes.MAP)
-            self.write(self._nl)
-            self.writeMapContents(v)
-        elif isinstance(v, Clear):
-            logger.debug(f"  Writing [TYPE_CLEAR]")
-            self.writeInt(MooTypes.CLEAR)
-            self.write(self._nl)
-        elif v is None:
-            logger.debug(f"  Writing [TYPE_NONE]")
-            self.writeInt(MooTypes.NONE)
-            self.write(self._nl)
-        elif isinstance(v, WaifReference):
-            logger.debug(f"  Writing [TYPE_WAIF] = {v}")
-            self.writeInt(MooTypes.WAIF)
-            self.write(self._nl)
-            self.writeWaif(v)
-        elif isinstance(v, SupportsInt):
-            logger.debug(f"  Writing [TYPE_INT] = {v}")
-            self.writeInt(MooTypes.INT)
-            self.write(self._nl)
-            self.writeInt(v)
-            self.write(self._nl)
-        else:
-            raise TypeError(f"Unsupported value type: {type(v).__name__}")
+        self.writeInt(self.valueType(v))
+        self.write(self._nl)
+        self.writeRawValue(v)
 
     def writeDatabase(self) -> None:
         if DBVersions.DBV_Exceptions <= self.db.version < DBVersions.DBV_NextGen:
@@ -392,18 +337,16 @@ class Writer:
         contents_as_objnums = [ObjNum(c) for c in obj.contents]
         self.writeValue(contents_as_objnums)
         logger.debug(f"  contents = {obj.contents}")
-        # Single parent → ObjNum, multiple parents → list of ObjNums, no parents → -1
-        if len(obj.parents) == 0:
+        # In the form the dump stored: a list (of any length), else one ObjNum, #-1 for none
+        if obj.parents_listed or len(obj.parents) > 1:
+            self.writeValue([ObjNum(p) for p in obj.parents])
+            logger.debug(f"  parents = {obj.parents}")
+        elif len(obj.parents) == 0:
             self.writeValue(ObjNum(-1))
             logger.debug(f"  parent = #-1 (none)")
-        elif len(obj.parents) == 1:
+        else:
             self.writeValue(ObjNum(obj.parents[0]))
             logger.debug(f"  parent = #{obj.parents[0]}")
-        else:
-            # Convert to ObjNums for proper TYPE_OBJ encoding
-            parents_as_objnums = [ObjNum(p) for p in obj.parents]
-            self.writeValue(parents_as_objnums)
-            logger.debug(f"  parents = {obj.parents}")
         # Children list - convert to ObjNums
         children_as_objnums = [ObjNum(c) for c in obj.children]
         self.writeValue(children_as_objnums)
@@ -560,9 +503,7 @@ class Writer:
         # Header format: "startTime id type_code" where type_code is the value type
         # If no value, we don't write the type code part
         if task.value is not None:
-            # Get the type code from TYPE_MAPPING
-            value_type = TYPE_MAPPING.get(type(task.value), MooTypes.INT)
-            self.writeString(f"{task.startTime} {task.id} {int(value_type)}")
+            self.writeString(f"{task.startTime} {task.id} {int(self.valueType(task.value))}")
             # Write value data WITHOUT type tag (type is in header)
             self.writeRawValue(task.value)
         else:
@@ -586,11 +527,7 @@ class Writer:
         self.writeString(header)
         for name, value in env.items():
             self.writeString(name)
-            moo_type = TYPE_MAPPING.get(type(value), MooTypes.INT)
-            self.writeInt(moo_type)
-            self.write(self._nl)
-            if moo_type != MooTypes.NONE:
-                self.writeRawValue(value)
+            self.writeValue(value)
 
     def writeConnections(self):
         # Write connection count and data
