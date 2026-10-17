@@ -1095,3 +1095,7 @@ def history(ctx, repo, start, end, from_date, to_date, branch, mode, output_dir,
 from .graph_cli import register_graph
 
 register_graph(moodb)
+
+from .mail_cli import register_mail
+
+register_mail(moodb, _db)
