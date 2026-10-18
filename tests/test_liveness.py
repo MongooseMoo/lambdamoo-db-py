@@ -49,6 +49,20 @@ def test_what_an_unreachable_object_holds_goes_with_it_and_ownership_keeps_nothi
     assert {loose, inside} <= unreachable(db)
 
 
+def test_a_suite_is_a_root_and_keeps_what_its_code_names():
+    from lambdamoo_db.database import Verb
+
+    db = load(str(TOASTCORE))
+    suite, fake, probe = _loose(db), _loose(db), _loose(db)
+    for oid, name, code in ((suite, "test_delivery tdel", f"return #{fake}:deliver();"), (probe, "probe", "return 1;")):
+        verb = Verb(name, 2, 5, -1, oid)
+        verb.code = [code]
+        db.objects[oid].verbs = [verb]
+    gone = unreachable(db)
+    assert suite not in gone and fake not in gone  # `@test #N` reaches a suite
+    assert probe in gone  # verbs alone do not make an object a root
+
+
 def test_an_object_held_only_by_a_removed_one_becomes_unreachable():
     db = load(str(TOASTCORE))
     holder, held = _loose(db), _loose(db)
@@ -131,9 +145,10 @@ def test_unreachable_cli_groups_by_outermost_object_with_owners_and_mentions(tmp
     Writer(db=db, output_file=out).writeDatabase()
     path = tmp_path / "loose.db"
     path.write_bytes(out.getvalue().encode("latin-1"))
-    result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(path), "unreachable"])
+    result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(path), "unreachable", "--with-verbs"])
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
+    assert "with verbs: 0 objects, 0 verbs" in lines
     assert lines[0] == "unreachable: 2 objects in 1 groups"
     assert lines[1].split()[:2] == ["2", f"#{loose}"]
     assert any(line.split() == ["2", "#2", '"Wizard"', "[player]"] for line in lines)

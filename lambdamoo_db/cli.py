@@ -576,8 +576,12 @@ def mentions(ctx: click.Context, limit: int) -> None:
 @click.option("--limit", default=40, show_default=True, help="Groups to list (0 = all).")
 @click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
               help="Treat this removal set (as `removal --set` reads it) as already gone.")
+@click.option("--with-verbs", is_flag=True,
+              help="Also list each unreachable object that has verbs, with their names: a test suite run only "
+                   "by typing `@test #N` is unreachable by design.")
 @click.pass_context
-def unreachable(ctx: click.Context, skip: tuple[str, ...], limit: int, set_file: str | None) -> None:
+def unreachable(ctx: click.Context, skip: tuple[str, ...], limit: int, set_file: str | None,
+                with_verbs: bool) -> None:
     """Objects nothing live reaches, grouped under the outermost unreachable object that holds them.
 
     Roots: #0 (every $name), players, tasks and other slots no object holds. Followed: every number a
@@ -597,6 +601,7 @@ def unreachable(ctx: click.Context, skip: tuple[str, ...], limit: int, set_file:
         kept = _read_set(set_file)
         chosen, _ = _chosen(db, kept["refs"], kept["--owned-by"], kept["--name"])
         removed = plan(db, chosen, bool(kept["--with-contents"])).removed
+        skip = (*skip, *kept["--sweep-skip"])
     gone = find(db, skip, removed)
     players = {int(p) for p in db.players}
     owners = Counter(int(db.objects[oid].owner) for oid in gone)
@@ -625,6 +630,13 @@ def unreachable(ctx: click.Context, skip: tuple[str, ...], limit: int, set_file:
         kind = ("player" if owner in players else "nothing" if owner == -1
                 else "object" if owner in db.objects else "missing")
         click.echo(f"{n:>7}  {label(db, owner) if owner in db.objects else f'#{owner}'} [{kind}]")
+    if with_verbs:
+        coded = [oid for oid in sorted(gone) if db.objects[oid].verbs]
+        click.echo(f"with verbs: {len(coded)} objects, {sum(len(db.objects[o].verbs) for o in coded)} verbs")
+        for oid in coded:
+            names = [v.name for v in db.objects[oid].verbs]
+            click.echo(f"    {label(db, oid)} owner #{int(db.objects[oid].owner)}: {len(names)}: "
+                       + ", ".join(names[:8]) + (" ..." if len(names) > 8 else ""))
     click.echo(f"spelled as #N in a string elsewhere (the sweep cannot follow these): {len(spelled)}")
     for oid, where in sorted(spelled.items())[:limit or None]:
         click.echo(f"    {label(db, oid)}  in {', '.join(sorted(where)[:4])}" + (" ..." if len(where) > 4 else ""))

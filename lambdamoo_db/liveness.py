@@ -1,7 +1,8 @@
 """Which objects nothing live can reach: a mark and sweep over every object-number slot in a dump.
 
-Roots are #0 (and so every $name), every player, and every slot held by no object: tasks, the dump's
-player list, pending values, connections, anonymous objects. From a reached object, every number it holds
+Roots are #0 (and so every $name), every player, every test suite (an object owning a `test_*` verb,
+reached by typing `@test #N`), and every slot held by no object: tasks, the dump's player list, pending
+values, connections, anonymous objects. From a reached object, every number it holds
 is reached: property values, verb code literals, location, contents, parents, and the waifs its
 properties hold. Not followed: children lists (a class does not keep its instances alive), owners and
 owned lists (a player keeps nothing alive by owning it), `last_move` (history), `.lost_souls`, and any
@@ -41,6 +42,12 @@ def edges(db: MooDatabase, skip: Iterable[str] = ()) -> tuple[dict[int, set[int]
 
     remap(db, visit)
     return out, roots
+
+
+def suites(db: MooDatabase) -> list[int]:
+    """Objects owning a `test_*` verb: test suites, reached by someone typing `@test #N`, so roots."""
+    return [oid for oid, o in db.objects.items()
+            if any(name.startswith("test_") for v in o.verbs for name in v.name.split())]
 
 
 MENTION = re.compile(r"#(\d+)")
@@ -85,7 +92,7 @@ def unreachable(db: MooDatabase, skip: Iterable[str] = (), gone: frozenset[int] 
     nothing and keep nothing alive)."""
     held, roots = edges(db, skip)
     reached: set[int] = set()
-    todo = [0, *(int(p) for p in db.players), *roots]
+    todo = [0, *(int(p) for p in db.players), *roots, *suites(db)]
     while todo:
         oid = todo.pop()
         if oid in reached or oid not in db.objects or oid in gone:
