@@ -46,7 +46,7 @@ from .inspection import (
     verb_summary,
     verbcasecmp,
 )
-from .lazy import default_cache_dir, open_indexed
+from .lazy import LazyDatabase, default_cache_dir, open_indexed
 from .reader import load
 from .split import DEFAULT_MAX_PIECE_BYTES, SplitError, first_difference, join_dir, write_split
 
@@ -297,14 +297,34 @@ def _slot_label(where: tuple) -> str:
     return ".".join(s for s in where if isinstance(s, str) and s not in ("key", "value"))
 
 
+def _missing_key(db, by: str, number: int, where: tuple) -> str:
+    """The group a slot naming missing object #number falls in, for `slots --missing-by`."""
+    if by == "target":
+        return f"#{number}"
+    head = where[0]
+    if head == "waifs":
+        cls = int(db.waifs[where[1]].waif_class)
+        return f"waifs of class #{cls} {db.name_of(cls) or ''}".rstrip()
+    if by == "property" and isinstance(head, str) and head.startswith(("#", "anon ")):
+        return f"{where[1]}" if str(where[1])[:1] == "." else _slot_label(where)
+    if by == "holder" and isinstance(head, str) and head.startswith("#"):
+        return f"{head} {db.name_of(int(head[1:])) or ''}".rstrip()
+    return _slot_label(where)
+
+
 @moodb.command()
+@click.option("--missing-by", type=click.Choice(["holder", "property", "target"]),
+              help="Instead of the field table, group the slots naming a missing object by the object holding them, "
+                   "the property they are in, or the missing number.")
+@click.option("--limit", default=40, show_default=True, help="Groups to show with --missing-by.")
 @click.pass_context
-def slots(ctx: click.Context) -> None:
+def slots(ctx: click.Context, missing_by: str | None, limit: int) -> None:
     """Count every slot holding an object number, by field.
 
     Columns: slots; how many hold a negative number (#-1 and the like); how many
     name a permanent object that does not exist (recycled or past the end).
-    The fields are those the renumbering walk rewrites.
+    The fields are those the renumbering walk rewrites. Waif slots are grouped
+    by the waif's class.
     """
     from .objnums import remap as remap_numbers
 
@@ -313,18 +333,76 @@ def slots(ctx: click.Context) -> None:
     db = load(ctx.obj["path"])
     permanent = {oid for oid, o in db.objects.items() if not o.anon}
     counts: dict[tuple[str, str], list[int]] = {}
+    missing: Counter[str] = Counter()
 
     def count(kind: str, number: int, where: tuple) -> int:
         row = counts.setdefault((kind, _slot_label(where)), [0, 0, 0])
         row[0] += 1
         row[1] += number < 0
-        row[2] += kind == "object" and number >= 0 and number not in permanent
+        if kind == "object" and number >= 0 and number not in permanent:
+            row[2] += 1
+            if missing_by:
+                missing[_missing_key(db, missing_by, number, where)] += 1
         return number
 
     remap_numbers(db, count)
+    if missing_by:
+        click.echo(f"{sum(missing.values())} slots name a missing object, in {len(missing)} groups by {missing_by}")
+        for key, n in missing.most_common(limit):
+            click.echo(f"{n:>10}  {key}")
+        return
     click.echo(f"{'kind':<7} {'field':<44} {'slots':>10} {'negative':>9} {'missing':>8}")
-    for (kind, label), (total, negative, missing) in sorted(counts.items()):
-        click.echo(f"{kind:<7} {label:<44} {total:>10} {negative:>9} {missing:>8}")
+    for (kind, label), (total, negative, missing_count) in sorted(counts.items()):
+        click.echo(f"{kind:<7} {label:<44} {total:>10} {negative:>9} {missing_count:>8}")
+
+
+def _indexed(ctx: click.Context, path: str) -> LazyDatabase:
+    """``path`` opened through its offset index, built first if there is none."""
+    if ctx.obj["cache"] is None:
+        raise click.UsageError("this command reads the offset index; drop --no-cache")
+    db = open_indexed(path, ctx.obj["cache"])
+    if not isinstance(db, LazyDatabase):
+        db = open_indexed(path, ctx.obj["cache"])  # the first call built the index and parsed the whole dump
+    if not isinstance(db, LazyDatabase):
+        raise click.UsageError(f"{path} is older than format 17 and has no offset index")
+    return db
+
+
+@moodb.command()
+@click.option("--since", "old", type=click.Path(exists=True, dir_okay=False),
+              help="Only objects this older dump does not have (by number).")
+@click.option("--by", "field", type=click.Choice(["owner", "parent", "location"]), default="owner", show_default=True)
+@click.option("--limit", default=40, show_default=True, help="Groups to show.")
+@click.pass_context
+def census(ctx: click.Context, old: str | None, field: str, limit: int) -> None:
+    """Group objects by owner, first parent or location, with their size in the dump.
+
+    Bytes are the object's record (which holds the waifs first written there)
+    plus its verb programs. Each group shows up to three example objects.
+    """
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = _indexed(ctx, ctx.obj["path"])
+    index = db.index
+    skip = set(_indexed(ctx, old).index.records) if old else set()
+    groups: dict[int, list] = {}
+    for o in db.object_heads():
+        if o.id in skip:
+            continue
+        start, end, anon = index.records[o.id]
+        size = end - start + sum(e - s for s, e in index.programs.get(o.id, ()))
+        key = {"owner": lambda: int(o.owner), "parent": lambda: int(o.parents[0]) if o.parents else -1,
+               "location": lambda: int(o.location)}[field]()
+        row = groups.setdefault(key, [0, 0, []])
+        row[0] += 1
+        row[1] += size
+        if len(row[2]) < 3:
+            row[2].append(f"#{o.id} {o.name!r}")
+    objects, size = sum(r[0] for r in groups.values()), sum(r[1] for r in groups.values())
+    click.echo(f"{objects} objects, {size} bytes, in {len(groups)} groups by {field}"
+               + (f"; only objects {old} does not have" if old else ""))
+    for key, (n, b, examples) in sorted(groups.items(), key=lambda kv: -kv[1][1])[:limit]:
+        click.echo(f"{n:>7} {b:>12}  #{key} {db.name_of(key) or ''}  e.g. {', '.join(examples)}")
 
 
 @moodb.command()
