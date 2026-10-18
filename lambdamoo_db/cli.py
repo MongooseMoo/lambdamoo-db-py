@@ -14,6 +14,7 @@ from .inspection import (
     LookupFailed,
     added_property_definitions,
     added_verb_lines,
+    all_objects,
     all_properties,
     answers_call,
     builtin_value,
@@ -643,8 +644,13 @@ def prop(ctx: click.Context, spec: tuple[str, ...], full: bool) -> None:
 @click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
 @click.option("-l", "--verbs-only", is_flag=True, help="Print each matching verb once.")
 @click.option("-C", "--context", default=0, metavar="N", help="Show N lines of context around each match.")
+@click.option("--verb", "verb_names", multiple=True, metavar="NAME",
+              help="Only verbs NAME would call, by MOO name matching (repeatable).")
+@click.option("-L", "--verbs-without-match", is_flag=True,
+              help="Print each verb with a program and no matching line, once.")
 @click.pass_context
-def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool, context: int) -> None:
+def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool,
+         context: int, verb_names: tuple[str, ...], verbs_without_match: bool) -> None:
     """Search verb code (Python regex): #OBJ:[index] name:LINE: text."""
     db, names = _db(ctx)
     selected = [_object(db, r) for r in objs] or None
@@ -652,7 +658,19 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
         rx = re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if ignore_case else 0)
     except re.error as e:
         raise click.BadParameter(str(e), param_hint="PATTERN")
-    by_verb = groupby(grep_verbs(db, rx, selected), key=lambda h: (h.obj.id, h.index))
+
+    def wanted(v) -> bool:
+        return not verb_names or any(verbcasecmp(v.name, name) for name in verb_names)
+
+    if verbs_without_match:
+        if selected is None:
+            selected = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+        for o in selected:
+            for idx, v in enumerate(o.verbs):
+                if v.code and wanted(v) and not any(rx.search(line) for line in v.code):
+                    click.echo(f"{label(db, o.id, names)}:[{idx}] {moo_string(v.name)}")
+        return
+    by_verb = groupby((h for h in grep_verbs(db, rx, selected) if wanted(h.verb)), key=lambda h: (h.obj.id, h.index))
     for n_group, (_, group) in enumerate(by_verb):
         hits = list(group)
         o, idx, v = hits[0].obj, hits[0].index, hits[0].verb

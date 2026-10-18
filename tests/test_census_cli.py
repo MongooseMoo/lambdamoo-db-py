@@ -37,6 +37,15 @@ def test_census_needs_the_index():
     assert "drop --no-cache" in result.output
 
 
+def test_grep_verb_and_verbs_without_match():
+    with_pass = set(run("--no-cache", "--db", str(TOASTCORE), "grep", "--verb", "recycle", "-l", r"pass\("))
+    without = set(run("--no-cache", "--db", str(TOASTCORE), "grep", "--verb", "recycle", "-L", r"pass\("))
+    assert with_pass and not with_pass & without
+    every = run("--no-cache", "--db", str(TOASTCORE), "grep", "--verb", "recycle", "-L", "a^")  # matches no line
+    assert set(every) == with_pass | without
+    assert all('"' in line and ":[" in line for line in every)
+
+
 def test_format_time_takes_any_task_time():
     from lambdamoo_db.inspection import format_time
 
