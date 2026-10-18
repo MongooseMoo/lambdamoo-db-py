@@ -87,6 +87,13 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 
 Every command exits 1 with a message when a reference does not resolve.
 
+`code --raw REF:VERB` prints one complete program's source lines, including
+blank lines and editor stamps, without the display header or `.` terminator.
+Use it to export an editor buffer or an expected-old-source file. It requires
+one verb selector and cannot combine with `-n` or `--fingerprint`. An empty
+program prints nothing; an absent program is an error. This is text output
+through the console's encoding, not a byte-preserving dump export.
+
 `code --fingerprint SPEC...` returns a JSON array containing each resolved
 defining object, 0-based `index`, 1-based `native_slot`, program presence,
 line count, SHA256 and recognized editor stamp date in UTC. It prints no
@@ -330,6 +337,38 @@ are not necessarily corruption: multiple inheritance can share descendants.
 `--format json` requires `--summary`; ordinary listings retain their format.
 
 ### Comparing verb source
+
+For repeatable source audits, `grep` can filter whole verbs and their metadata:
+
+```sh
+moodb grep '\.wizard' --require '\.owner' --without '\$perm_utils\s*:' --code-only --summary
+moodb grep '\.wizard' --require '\.owner' --code-only --wizard-owned --executable -l --limit 30
+moodb grep 'property_info\(' --require 'return' --owner '#2' --format json --limit 20 --offset 20
+moodb batch 'grep ".wizard" -F --code-only --summary' 'grep "caller_perms()" -F --code-only --summary'
+```
+
+Every `--require PATTERN` must match somewhere in the same verb; any
+`--without PATTERN` match excludes that entire verb. Patterns still operate on
+individual lines. `-F` and `-i` apply to all patterns. `--code-only` masks string
+literals, including MOO comment statements and editor stamps, while keeping
+original line numbers and source in the returned evidence. It also masks literal
+arguments and dynamic names: it is lexical filtering, not control-flow analysis
+or an authorization verdict. Backtick expressions remain searchable code.
+
+`--owner REF` selects verb ownership, which can differ from object ownership;
+repeat it to allow several owners. `--wizard-owned` checks the verb owner's
+stored wizard flag; a missing owner does not qualify. `--executable` requires
+the x bit. These filters describe this checkpoint, not the live task's authority.
+
+`--summary` omits names/source and counts matching lines and verbs by object and
+verb owner. `--format json` returns the same counts, or, without `--summary`,
+matching verb metadata and exact line evidence. Combine JSON with `-l` to omit
+source. `--limit N` and `--offset N` page by matching verb, while scanning and
+counting all matches; JSON exposes `next_offset`, `returned_verbs` and
+`truncated`. Zero limit counts without returning any verbs. Counts are matching
+source lines, not individual regex occurrences. Summary mode cannot be paged
+or combined with `-l`/context; JSON cannot include context. Ordinary unpaged text
+output retains its existing format. No-match queries succeed with zero counts.
 
 ```sh
 moodb --db new.db added old.db

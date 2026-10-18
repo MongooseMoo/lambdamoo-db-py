@@ -43,6 +43,8 @@ from .inspection import (
     tasks as list_tasks,
     tree_summary,
     value_holders,
+    verb_args,
+    verb_perms,
     verb_summary,
     verbcasecmp,
 )
@@ -428,8 +430,9 @@ def _print_program(db, names, o, idx: int, v, line_numbers: bool) -> None:
 @click.argument("spec", nargs=-1, required=True)
 @click.option("-n", "--line-numbers", is_flag=True, help="Number the code lines.")
 @click.option("--fingerprint", is_flag=True, help="Print JSON hashes, line counts and recognized UTC stamp dates, without source text.")
+@click.option("--raw", is_flag=True, help="Print exactly one REF:VERB program's lines, without a header or terminator.")
 @click.pass_context
-def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerprint: bool) -> None:
+def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerprint: bool, raw: bool) -> None:
     """Print verb code: `code '$httpd:GET' 852:12`. A bare REF prints every verb on it.
 
     Verbs are found on the object or its ancestors; the header names the
@@ -437,11 +440,18 @@ def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerpr
     """
     if fingerprint and line_numbers:
         raise click.UsageError("--fingerprint cannot be combined with --line-numbers")
+    if raw and (fingerprint or line_numbers or len(spec) != 1 or ':' not in spec[0]):
+        raise click.UsageError("--raw requires exactly one REF:VERB and cannot be combined with --fingerprint or --line-numbers")
     db, names = _db(ctx)
     fingerprints = []
 
     def emit(o, idx, v):
-        if fingerprint:
+        if raw:
+            if v.code is None:
+                raise click.ClickException("verb has no program")
+            for line in v.code:
+                click.echo(line)
+        elif fingerprint:
             fingerprints.append({"object": o.id, "index": idx, "native_slot": idx + 1,
                                  **code_fingerprint(v)})
         else:
@@ -564,20 +574,68 @@ def prop(ctx: click.Context, spec: tuple[str, ...], full: bool) -> None:
 @click.option("-i", "--ignore-case", is_flag=True)
 @click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
 @click.option("-l", "--verbs-only", is_flag=True, help="Print each matching verb once.")
-@click.option("-C", "--context", default=0, metavar="N", help="Show N lines of context around each match.")
+@click.option("-C", "--context", default=0, type=click.IntRange(min=0), metavar="N", help="Show N lines of context around each match.")
+@click.option("--require", multiple=True, metavar="PATTERN", help="Each pattern must match somewhere in the same verb.")
+@click.option("--without", multiple=True, metavar="PATTERN", help="Exclude a whole verb if any of these patterns matches.")
+@click.option("--code-only", is_flag=True, help="Match outside string literals, including MOO comment statements.")
+@click.option("--owner", "owners", multiple=True, metavar="REF", help="Only verbs owned by REF (repeatable).")
+@click.option("--wizard-owned", is_flag=True, help="Only verbs whose owner has the wizard flag in this dump.")
+@click.option("--executable", is_flag=True, help="Only verbs with the x permission.")
+@click.option("--summary", is_flag=True, help="Count matching lines/verbs by object and owner; omit source and names.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.option("--limit", type=click.IntRange(min=0), default=None, help="Display at most N matching verbs; scan and count all.")
+@click.option("--offset", type=click.IntRange(min=0), default=0, help="Skip N matching verbs in the display.")
 @click.pass_context
-def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool, context: int) -> None:
-    """Search verb code (Python regex): #OBJ:[index] name:LINE: text."""
+def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool, context: int,
+         require: tuple[str, ...], without: tuple[str, ...], code_only: bool, owners: tuple[str, ...], wizard_owned: bool,
+         executable: bool, summary: bool, output_format: str, limit: int | None, offset: int) -> None:
+    """Search verb code (Python regex): #OBJ:[index] name:LINE: text.
+
+    Whole-verb filters find co-occurring patterns; they do not prove control
+    flow or authorization. --code-only masks all strings, so dynamic names
+    and literal arguments cannot match. -F and -i apply to every pattern.
+    """
+    if context and output_format == "json":
+        raise click.UsageError("--context cannot be combined with --format json")
+    if summary and (context or verbs_only or limit is not None or offset):
+        raise click.UsageError("--summary cannot be combined with --context, --verbs-only, --limit or --offset")
+
+    def compile_pattern(value, option):
+        try:
+            return re.compile(re.escape(value) if fixed_strings else value, re.IGNORECASE if ignore_case else 0)
+        except re.error as e:
+            raise click.BadParameter(str(e), param_hint=option)
+
+    rx = compile_pattern(pattern, "PATTERN")
+    required = [compile_pattern(value, "--require") for value in require]
+    excluded = [compile_pattern(value, "--without") for value in without]
     db, names = _db(ctx)
     selected = [_object(db, r) for r in objs] or None
-    try:
-        rx = re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if ignore_case else 0)
-    except re.error as e:
-        raise click.BadParameter(str(e), param_hint="PATTERN")
-    by_verb = groupby(grep_verbs(db, rx, selected), key=lambda h: (h.obj.id, h.index))
+    owner_ids = {_object(db, r).id for r in owners} if owners else None
+    matches = grep_verbs(db, rx, selected, require=required, exclude=excluded, code_only=code_only,
+                         owners=owner_ids, wizard_owned=wizard_owned, executable=executable)
+    by_verb = groupby(matches, key=lambda h: (h.obj.id, h.index))
+    counts = {"matched_lines": 0, "matched_verbs": 0, "matched_objects": 0}
+    object_counts, owner_counts = {}, {}
+    records = []
     for n_group, (_, group) in enumerate(by_verb):
         hits = list(group)
         o, idx, v = hits[0].obj, hits[0].index, hits[0].verb
+        counts["matched_lines"] += len(hits)
+        counts["matched_verbs"] += 1
+        for groups, key in ((object_counts, o.id), (owner_counts, int(v.owner))):
+            entry = groups.setdefault(key, {"verbs": 0, "lines": 0})
+            entry["verbs"] += 1
+            entry["lines"] += len(hits)
+        if summary or n_group < offset or (limit is not None and n_group >= offset + limit):
+            continue
+        if output_format == "json":
+            record = {"object": o.id, "index": idx, "names": v.name, "owner": int(v.owner),
+                      "perms": verb_perms(v), "args": verb_args(v)}
+            if not verbs_only:
+                record["lines"] = [{"line": h.lineno, "text": h.line} for h in hits]
+            records.append(record)
+            continue
         if verbs_only:
             click.echo(f"{label(db, o.id, names)}:[{idx}] {moo_string(v.name)}")
             continue
@@ -595,6 +653,26 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
                 click.echo("--")
             sep = ":" if n in matched else "-"
             click.echo(f"#{o.id}:[{idx}] {_alias(v)}{sep}{n}{sep} {code_lines[n - 1].strip()}")
+    counts["matched_objects"] = len(object_counts)
+    if summary:
+        data = {**counts,
+                "objects": [{"object": key, **value} for key, value in sorted(object_counts.items())],
+                "owners": [{"owner": key, **value} for key, value in sorted(owner_counts.items())]}
+        if output_format == "json":
+            click.echo(json.dumps(data))
+        else:
+            for key, value in object_counts.items():
+                click.echo(f"#{key}: {value['verbs']} verbs, {value['lines']} matching lines")
+            for key, value in sorted(owner_counts.items()):
+                click.echo(f"owner #{key}: {value['verbs']} verbs, {value['lines']} matching lines")
+    elif output_format == "json":
+        end = min(counts["matched_verbs"], offset + len(records))
+        next_offset = end if end < counts["matched_verbs"] and records else None
+        click.echo(json.dumps({**counts, "offset": offset, "returned_verbs": len(records),
+                               "next_offset": next_offset,
+                               "truncated": len(records) < counts["matched_verbs"], "verbs": records}))
+    if output_format == "text" and (summary or limit is not None or offset):
+        click.echo(f"{counts['matched_lines']} matching lines in {counts['matched_verbs']} verbs on {counts['matched_objects']} objects")
 
 
 @moodb.command()
