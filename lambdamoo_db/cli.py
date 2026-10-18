@@ -417,6 +417,58 @@ def verbs(ctx: click.Context, ref: str, inherited: bool) -> None:
             click.echo(f"#{a.id}:[{idx}] {verb_summary(v)}")
 
 
+def _leading_comments(code) -> list[str]:
+    """The string-statement comments a program starts with, unquoted."""
+    found = []
+    for line in code or []:
+        match = re.fullmatch(r'\s*"((?:[^"\\]|\\.)*)";\s*', line)
+        if not match:
+            break
+        found.append(re.sub(r"\\(.)", r"\1", match[1]))
+    return found
+
+
+@moodb.command()
+@click.argument("refs", nargs=-1, required=True)
+@click.option("-i", "--inherited", is_flag=True, help="Also list commands of every ancestor.")
+@click.option("--lines", type=click.IntRange(min=0), default=3, show_default=True,
+              help="How many of each command's opening comment lines to show.")
+@click.option("--brief", is_flag=True, help="One line per object: its name and each command's first name.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.pass_context
+def commands(ctx: click.Context, refs: tuple[str, ...], inherited: bool, lines: int, brief: bool, fmt: str) -> None:
+    """What players can type at each object: verbs other than `this none this`, with their opening comments."""
+    db, names = _db(ctx)
+    records = []
+    for ref in refs:
+        o = _object(db, ref)
+        chain = db.ancestors(o) if inherited else [o]
+        record = {"object": o.id, "name": o.name, "parents": [a.id for a in db.ancestors(o)[1:]], "commands": []}
+        for a in chain:
+            for idx, v in enumerate(a.verbs):
+                args = verb_args(v)
+                if args == "this none this":
+                    continue
+                record["commands"].append({"object": a.id, "index": idx, "names": v.name, "args": args,
+                                           "comments": _leading_comments(v.code)[:lines]})
+        records.append(record)
+    if fmt == "json":
+        click.echo(json.dumps(records, ensure_ascii=True))
+        return
+    if brief:
+        for record in records:
+            names = " ".join(c["names"].split()[0] for c in record["commands"] if c["names"].split())
+            click.echo(f"#{record['object']} {record['name']}: {names}")
+        return
+    for record in records:
+        chain = " > ".join(f"#{n} {db.name_of(n)}" for n in record["parents"])
+        click.echo(f"== #{record['object']} {record['name']}" + (f"  (under {chain})" if chain else ""))
+        for c in record["commands"]:
+            click.echo(f"  #{c['object']}:[{c['index']}] \"{c['names']}\"  {c['args']}")
+            for comment in c["comments"]:
+                click.echo(f"      {comment}")
+
+
 def _print_program(db, names, o, idx: int, v, line_numbers: bool) -> None:
     click.echo(f"@program {label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
     if v.code is None:
@@ -787,9 +839,12 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
 @click.option("--prop", "mode", flag_value="prop", help="Find objects defining a property named TEXT (case-insensitive).")
 @click.option("--glob", "glob", is_flag=True,
               help="With --verb or --prop: TEXT is a shell pattern (`event_*`) matched against each verb name or the property name.")
+@click.option("--no-catchall", is_flag=True,
+              help="With --verb: ignore matches made only through a catch-all name, one with no letter or digit "
+                   "before its `*` (`*`, `@*`).")
 @click.option("-c", "--count", is_flag=True, help="Print only the number of hits for each TEXT.")
 @click.pass_context
-def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, count: bool) -> None:
+def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, no_catchall: bool, count: bool) -> None:
     """Find objects whose name or $name contains TEXT (case-insensitive).
 
     With --verb or --prop, find where a verb or property is defined instead.
@@ -797,15 +852,24 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
     """
     if glob and mode is None:
         raise click.UsageError("--glob needs --verb or --prop")
+    if no_catchall and mode != "verb":
+        raise click.UsageError("--no-catchall needs --verb")
     db, names = _db(ctx)
     hits: dict[str, list[str]] = {t: [] for t in text}
+
+    def calls(name, t):
+        if not no_catchall:
+            return answers_call(name, t)
+        return any(answers_call(alias, t) for alias in name.split()
+                   if not ("*" in alias and not re.search(r"[A-Za-z0-9]", alias.split("*")[0])))
+
     if mode == "verb":
         for o in object_heads(db):
             for idx, v in enumerate(o.verbs):
                 verb_names = v.name.lower().split()
                 verb_names += [n[1:] for n in verb_names if n.startswith(":")]  # a waif class verb, as it is called
                 for t in hits:
-                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else answers_call(v.name, t):
+                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else calls(v.name, t):
                         hits[t].append(f"{label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
     elif mode == "prop":
         for num, defined in defined_property_names(db):
@@ -1273,3 +1337,45 @@ register_graph(moodb)
 from .mail_cli import register_mail
 
 register_mail(moodb, _db)
+
+from .remote_cli import register_remote
+
+register_remote(moodb)
+
+
+@moodb.command()
+@click.argument("other", type=click.Path(exists=True, dir_okay=False))
+@click.argument("refs", nargs=-1)
+@click.option("--threshold", type=click.FloatRange(0, 1), default=0.5, show_default=True,
+              help="Least share of common lines for a same-named verb to count as similar.")
+@click.option("--verbs", "show_verbs", is_flag=True, help="List every verb with where it matched.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.pass_context
+def match(ctx: click.Context, other: str, refs: tuple[str, ...], threshold: float, show_verbs: bool, fmt: str) -> None:
+    """Which objects of OTHER (all with code, or REFS) already exist in --db, judged by verb code.
+
+    A verb matches exactly when its source is the same after indentation, blank
+    lines and "Last modified" footers are removed; it is similar when a verb
+    sharing one of its names has at least THRESHOLD of its lines. Verdicts:
+    "have it" (80% exact), "have a different version" (half exact or similar),
+    "new".
+    """
+    from .inspection import all_objects
+    from .match import VerbIndex, match_objects, verdict
+    db, _ = _db(ctx)
+    other_db = load(other)
+    objs = [_object(other_db, r) for r in refs] if refs else [o for o in all_objects(other_db) if any(v.code for v in o.verbs)]
+    results = match_objects(VerbIndex(db), objs, threshold)
+    for r in results:
+        r["verdict"] = verdict(r)
+    if fmt == "json":
+        click.echo(json.dumps(results, ensure_ascii=True))
+        return
+    for r in results:
+        click.echo(f"#{r['object']} {r['name']}: {r['verdict']} "
+                   f"(exact {r['exact']}, similar {r['similar']}, new {r['new']})")
+        if show_verbs:
+            for v in r["verbs"]:
+                where = ", ".join(f"#{p[0]}:{p[2].split()[0]}" if v["match"] == "exact"
+                                  else f"#{p[1][0]}:{p[1][2].split()[0]} {p[0]:.0%}" for p in v["where"])
+                click.echo(f"    {v['verb']}: {v['match']}{'  ' + where if where else ''}")
