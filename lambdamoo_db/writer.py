@@ -391,21 +391,19 @@ class Writer:
         self.write(self._nl)
 
     def writeVerbs(self, include_count: bool = True) -> None:
-        # Count verbs with programs (None = no program, [] = empty program)
-        verbs_with_programs = [v for v in self.db.all_verbs() if v.code is not None]
+        # Count verbs with programs (None = no program, [] = empty program).
+        # Positions come from enumeration: two equal verbs on one object are still two programs.
+        verbs_with_programs = [(obj.id, index, verb) for obj in self.db.objects.values()
+                               for index, verb in enumerate(obj.verbs) if verb.code is not None]
         if include_count:
             self.writeInt(len(verbs_with_programs))
             self.write(self._nl)
         # Write each verb program
-        for verb in verbs_with_programs:
-            self.writeVerb(verb)
+        for objnum, index, verb in verbs_with_programs:
+            self.writeVerb(objnum, index, verb)
 
-    def writeVerb(self, verb: Verb) -> None:
-        objnum = verb.object
-        object = self.db.objects[objnum]
-        index = object.verbs.index(verb)
-        vloc = f"#{objnum}:{index}"
-        self.writeString(vloc)
+    def writeVerb(self, objnum: int, index: int, verb: Verb) -> None:
+        self.writeString(f"#{objnum}:{index}")
         self.writeCode(verb.code)
 
     def writeCode(self, code: list[str]) -> None:

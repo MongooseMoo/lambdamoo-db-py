@@ -172,6 +172,20 @@ def test_built_database_reads_back_with_moodb(tmp_path):
     assert "seats" in props.output and "unreadable" in props.output and "#2" in props.output
 
 
+def test_two_equal_verbs_on_one_object_write_as_two_programs(tmp_path):
+    same = {"info": [2, "rxd", "look"], "args": ["this", "none", "none"], "lines": 1, "code": ["return 1;"]}
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    for r in (record(0, "System", -1, []),
+              record(4, "Twice", -1, [], verbs=[{"index": 1, **same}, {"index": 2, **same}])):
+        (records_dir / f"{r['object']}.json").write_text(json.dumps(r), encoding="ascii")
+    out = tmp_path / "x.db"
+    assert CliRunner().invoke(moodb, ["remote", "build", str(records_dir), str(out)]).exit_code == 0
+    code = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "code", "#4:1"])
+    assert code.exit_code == 0, code.output
+    assert "return 1;" in code.output
+
+
 def test_match_sorts_verbs_into_exact_similar_and_new(tmp_path):
     def db_of(records):
         d = tmp_path / f"r{len(list(tmp_path.iterdir()))}"
