@@ -11,6 +11,10 @@ import socket
 import time
 from dataclasses import dataclass
 
+from .database import CLEAR, MooDatabase, MooError, MooObject, ObjNum, Property, Verb
+from .enums import ObjectFlags
+from .inspection import ERROR_NAMES
+
 MARK = "@@moodb"
 
 
@@ -231,6 +235,196 @@ def read_census(path):
             else:
                 rows[record["object"]] = record
     return rows, blocks
+
+
+# Everything one character can read of one object, as tagged rows:
+#   {"obj", o, name, owner, parent, r, f, w, player, programmer, wizard, verb names or 0}
+#   {"verb", i, verb_info or 0, verb_args or 0, code lines or -1}, then {"code", i, lines} in chunks
+#   {"props", whether properties(o) was readable}
+#   {"prop", name, property_info or 0, readable, value}            properties defined on o
+#   {"ival", ancestor, name, property_info or 0, clear, readable, value}   inherited slots, parent first
+# When verbs(o) is unreadable, verbs are tried by index until E_VERBNF.
+OBJECT_READ = (
+    'o = #{obj}; vs = `verbs(o) ! ANY => 0\'; '
+    '__emit({{"obj", o, o.name, o.owner, parent(o), o.r, o.f, o.w, is_player(o), o.programmer, o.wizard, vs}}); '
+    'n = typeof(vs) == LIST ? length(vs) | {max_verbs}; '
+    'for i in [1..n] info = `verb_info(o, i) ! ANY\'; '
+    'if (info == E_VERBNF) break; elseif (typeof(info) == ERR) info = 0; endif '
+    'args = `verb_args(o, i) ! ANY => 0\'; code = `verb_code(o, i) ! ANY => 0\'; '
+    '__emit({{"verb", i, info, args, typeof(code) == LIST ? length(code) | -1}}); '
+    'if (typeof(code) == LIST) for a in [0..(length(code) - 1) / {chunk}] '
+    '__emit({{"code", i, code[a * {chunk} + 1..min(a * {chunk} + {chunk}, length(code))]}}); endfor endif '
+    '$command_utils:suspend_if_needed(0); endfor '
+    'ps = `properties(o) ! ANY => 0\'; __emit({{"props", typeof(ps) == LIST}}); '
+    'if (typeof(ps) == LIST) for p in (ps) ok = 1; v = `o.(p) ! ANY => (ok = 0)\'; '
+    '__emit({{"prop", p, `property_info(o, p) ! ANY => 0\', ok, v}}); $command_utils:suspend_if_needed(0); endfor endif '
+    'a = parent(o); while (valid(a)) for p in (`properties(a) ! ANY => {{}}\') '
+    'c = `is_clear_property(o, p) ! ANY => -1\'; ok = 1; v = c == 1 ? 0 | `o.(p) ! ANY => (ok = 0)\'; '
+    '__emit({{"ival", a, p, `property_info(o, p) ! ANY => 0\', c, ok, v}}); $command_utils:suspend_if_needed(0); endfor '
+    'a = parent(a); endwhile'
+)
+
+
+def read_object(session, obj, max_verbs=500, chunk=30):
+    """One object as a dict of its header, verbs (with code where readable) and property slots."""
+    rows = session.eval_rows(OBJECT_READ.format(obj=obj, max_verbs=max_verbs, chunk=chunk))
+    head = rows[0]
+    record = {"object": head[1].id, "name": head[2], "owner": head[3].id, "parent": head[4].id,
+              "flags": {"r": head[5], "f": head[6], "w": head[7], "player": head[8],
+                        "programmer": head[9], "wizard": head[10]},
+              "verb_names": head[11] if isinstance(head[11], list) else None,
+              "verbs": [], "props_known": False, "props": [], "inherited": []}
+    verbs = {}
+    for row in rows[1:]:
+        kind = row[0]
+        if kind == "verb":
+            verbs[row[1]] = {"index": row[1], "info": _plain(row[2]), "args": _plain(row[3]),
+                             "lines": row[4], "code": [] if row[4] >= 0 else None}
+            record["verbs"].append(verbs[row[1]])
+        elif kind == "code":
+            verbs[row[1]]["code"].extend(row[2])
+        elif kind == "props":
+            record["props_known"] = bool(row[1])
+        elif kind == "prop":
+            record["props"].append({"name": row[1], "info": _plain(row[2]), "readable": bool(row[3]),
+                                    "value": _encode(row[4])})
+        elif kind == "ival":
+            record["inherited"].append({"from": row[1].id, "name": row[2], "info": _plain(row[3]),
+                                        "clear": row[4], "readable": bool(row[5]), "value": _encode(row[6])})
+    for verb in record["verbs"]:
+        if verb["code"] is not None and len(verb["code"]) != verb["lines"]:
+            raise RemoteError(f"#{obj} verb {verb['index']}: {verb['lines']} lines sent, {len(verb['code'])} received")
+    return record
+
+
+def _plain(value):
+    """verb_info/verb_args/property_info result as JSON, or None where it was unreadable."""
+    if not isinstance(value, list):
+        return None
+    return [v.id if isinstance(v, Obj) else v for v in value]
+
+
+def _encode(value):
+    """A MOO value as JSON that keeps its type: objects and errors are tagged."""
+    if isinstance(value, Obj):
+        return {"obj": value.id}
+    if isinstance(value, Err):
+        return {"err": value.name}
+    if isinstance(value, float):
+        return {"float": value}
+    if isinstance(value, list):
+        return [_encode(v) for v in value]
+    if isinstance(value, dict):
+        return {"map": [[_encode(k), _encode(v)] for k, v in value.items()]}
+    return value
+
+
+UNREADABLE = "<<moodb remote: value unreadable to the reading character>>"
+
+PREPS = ["with/using", "at/to", "in front of", "in/inside/into", "on top of/on/onto/upon",
+         "out of/from inside/from", "over", "through", "under/underneath/beneath", "behind", "beside",
+         "for/about", "is", "as", "off/off of"]
+ARG_SPECS = {"none": 0, "any": 1, "this": 2}
+
+
+def _prep_index(prep):
+    if prep == "none":
+        return -2
+    if prep == "any":
+        return -1
+    words = set(prep.split("/"))
+    for index, spelling in enumerate(PREPS):
+        if words & set(spelling.split("/")):
+            return index
+    raise ValueError(f"unknown preposition {prep!r}")
+
+
+def _perm_bits(text, letters):
+    return sum(bit for letter, bit in letters.items() if letter in text)
+
+
+def _decode(value):
+    if isinstance(value, list):
+        return [_decode(v) for v in value]
+    if isinstance(value, dict):
+        if "obj" in value:
+            return ObjNum(value["obj"])
+        if "err" in value:
+            return MooError(ERROR_NAMES.index(value["err"]))
+        if "float" in value:
+            return float(value["float"])
+        return {_decode(k): _decode(v) for k, v in value["map"]}
+    return value
+
+
+def build_database(records):
+    """A version 17 MooDatabase of the read objects; numbers not read are recycled slots.
+
+    Returns (db, skipped): an object's property slots need the property names of it and every
+    ancestor, so an object where any of those was not read, or was unreadable, is left out and
+    listed in skipped with the first such object.
+    """
+    def missing_ancestor(record):
+        if not record["props_known"]:
+            return record["object"]
+        parent = record["parent"]
+        while parent >= 0:
+            if parent not in records or not records[parent]["props_known"]:
+                return parent
+            parent = records[parent]["parent"]
+        return None
+
+    skipped = {n: missing_ancestor(r) for n, r in records.items() if missing_ancestor(r) is not None}
+    kept = {n: r for n, r in records.items() if n not in skipped}
+    db = MooDatabase()
+    db.version = 17
+    db.versionstring = "** LambdaMOO Database, Format Version 17 **"
+    for n, record in kept.items():
+        flags = record["flags"]
+        bits = ((ObjectFlags.USER if flags["player"] else 0) | (ObjectFlags.PROGRAMMER if flags["programmer"] else 0)
+                | (ObjectFlags.WIZARD if flags["wizard"] else 0) | (ObjectFlags.READ if flags["r"] else 0)
+                | (ObjectFlags.WRITE if flags["w"] else 0) | (ObjectFlags.FERTILE if flags["f"] else 0))
+        obj = MooObject(n, record["name"], bits, record["owner"], -1,
+                        [record["parent"]] if record["parent"] >= 0 else [])
+        names = record["verb_names"]
+        for verb in record["verbs"]:
+            info, args = verb["info"], verb["args"]
+            name = info[2] if info else (names[verb["index"] - 1] if names else f"<<unreadable verb {verb['index']}>>")
+            perms = _perm_bits(info[1], {"r": 1, "w": 2, "x": 4, "d": 8}) if info else 0
+            preps = -2
+            if args:
+                perms |= ARG_SPECS[args[0]] << 4 | ARG_SPECS[args[2]] << 6
+                preps = _prep_index(args[1])
+            v = Verb(name, info[0] if info else -1, perms, preps, n)
+            v.code = verb["code"]
+            obj.verbs.append(v)
+
+        def slot(name, info, readable, value, clear=False):
+            owner, perms = (info[0], _perm_bits(info[1], {"r": 1, "w": 2, "c": 4})) if info else (-1, 0)
+            return Property(name, CLEAR if clear else _decode(value) if readable else UNREADABLE, owner, perms)
+
+        obj.properties = [slot(p["name"], p["info"], p["readable"], p["value"]) for p in record["props"]]
+        obj.propdefs_count = len(obj.properties)
+        for parent in _chain(kept, record["parent"]):
+            values = {i["name"]: i for i in record["inherited"] if i["from"] == parent}
+            for p in kept[parent]["props"]:
+                i = values.get(p["name"])
+                obj.properties.append(slot(p["name"], i and i["info"], bool(i and i["readable"]),
+                                           i and i["value"], clear=bool(i and i["clear"] == 1)))
+        db.objects[n] = obj
+    for n, obj in db.objects.items():
+        if obj.parents:
+            db.objects[obj.parents[0]].children.append(n)
+    db.total_objects = max(db.objects, default=-1) + 1
+    db.recycled_objects = set(range(db.total_objects)) - set(db.objects)
+    db.players = sorted(n for n, r in kept.items() if r["flags"]["player"])
+    return db, skipped
+
+
+def _chain(records, parent):
+    while parent >= 0:
+        yield parent
+        parent = records[parent]["parent"]
 
 
 def rank(rows, fertile_only=False, include_players=False, min_verbs=1):

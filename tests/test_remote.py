@@ -113,6 +113,50 @@ def test_census_block_program_emits_one_row_per_object():
     assert program.count("__emit(") == 1 and "}); endif endfor" in program
 
 
+def record(n, name, parent, props, inherited=(), verbs=(), props_known=True, fertile=False):
+    return {"object": n, "name": name, "owner": 2, "parent": parent,
+            "flags": {"r": True, "f": fertile, "w": False, "player": False, "programmer": False, "wizard": False},
+            "verb_names": [v["info"][2] for v in verbs], "verbs": list(verbs), "props_known": props_known,
+            "props": list(props), "inherited": list(inherited)}
+
+
+def prop(name, value, readable=True):
+    return {"name": name, "info": [2, "rc"], "readable": readable, "value": value}
+
+
+def test_built_database_reads_back_with_moodb(tmp_path):
+    root = record(1, "Root Class", -1, [prop("description", "")])
+    verb = {"index": 1, "info": [2, "rxd", "sit"], "args": ["any", "on top of/on/onto/upon", "this"],
+            "lines": 2, "code": ['player:tell("You sit.");', "return 1;"]}
+    seat = record(5, "Generic Seat", 1, [prop("seats", 4), prop("secret", None, readable=False),
+                                         prop("owner_list", [{"obj": 2}, {"err": "E_PERM"}, {"float": 1.5}])],
+                  inherited=[{"from": 1, "name": "description", "info": [2, "rc"], "clear": 1,
+                              "readable": True, "value": 0}], verbs=[verb], fertile=True)
+    orphan = record(9, "Child of the unread", 7, [])
+    blind = record(11, "Child of the unreadable", 12, [])
+    unread_props = record(12, "Hidden", 1, [], props_known=False)
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    system = record(0, "The System Object", 1, [prop("seat", {"obj": 5})])
+    for r in (system, root, seat, orphan, blind, unread_props):
+        (records_dir / f"{r['object']}.json").write_text(json.dumps(r), encoding="ascii")
+    out = tmp_path / "lambda.db"
+
+    result = CliRunner().invoke(moodb, ["remote", "build", str(records_dir), str(out)])
+    assert result.exit_code == 0, result.output
+    assert f"{out}: 3 objects" in result.output
+    assert "left out #9: property names of #7 not read" in result.output
+    assert "left out #11: property names of #12 not read" in result.output
+    assert "left out #12: property names of #12 not read" in result.output
+
+    code = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "code", "#5:sit"])
+    assert code.exit_code == 0, code.output
+    assert 'player:tell("You sit.");' in code.output and "return 1;" in code.output
+    props = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "props", "#5"])
+    assert props.exit_code == 0, props.output
+    assert "seats" in props.output and "unreadable" in props.output and "#2" in props.output
+
+
 def rows_file(tmp_path, rows):
     path = tmp_path / "census.jsonl"
     base = {"owner": 2, "parent": 1, "readable": True, "player": False, "verbs": 5, "properties": 0}
