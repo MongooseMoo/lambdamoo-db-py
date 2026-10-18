@@ -50,6 +50,65 @@ def test_a_reference_from_outside_is_reported_with_its_field_and_holder():
     assert p.inbound[(".favourite", f"#{holder}", victim)] == 1
 
 
+def test_with_contents_takes_what_is_inside_but_never_a_player_or_an_older_object(monkeypatch):
+    import lambdamoo_db.removal as removal
+
+    db = load(str(TOASTCORE))
+    players = {int(p) for p in db.players}
+    room = next(oid for oid, o in db.objects.items()
+                if oid > 1 and not o.children and sum(int(c) not in players for c in o.contents) >= 2)
+    things = sorted(int(c) for c in db.objects[room].contents if int(c) not in players)
+    older, things = things[0], set(things[1:])
+    visitor = next(p for p in sorted(players) if int(db.objects[p].location) != room)
+    if int(db.objects[visitor].location) >= 0:
+        db.objects[int(db.objects[visitor].location)].contents.remove(ObjNum(visitor))
+    db.objects[visitor].location = ObjNum(room)
+    db.objects[room].contents.append(ObjNum(visitor))
+    monkeypatch.setattr(removal, "_created", lambda db, oid: 50 if oid == older else 100)
+    assert plan(db, [room]).stranded.keys() >= things | {older, visitor}
+    p = plan(db, [room], with_contents=True)
+    assert things <= p.contents <= p.removed
+    assert visitor not in p.removed and p.stranded[visitor] == room
+    assert older not in p.removed and p.stranded[older] == room
+    monkeypatch.setattr(removal, "_created", lambda db, oid: None)  # no times: nothing is taken
+    assert not plan(db, [room], with_contents=True).contents
+
+
+def test_refs_skip_leaves_out_named_properties(tmp_path):
+    from io import StringIO
+
+    from lambdamoo_db.writer import Writer
+
+    db = load(str(TOASTCORE))
+    victim = next(oid for oid, o in db.objects.items() if oid > 1)
+    slots = db.objects[0].properties[:2]
+    slots[0].value = [ObjNum(victim)]
+    slots[1].value = {"k": ObjNum(victim)}
+    out = StringIO()
+    Writer(db=db, output_file=out).writeDatabase()
+    path = tmp_path / "refs.db"
+    path.write_bytes(out.getvalue().encode("latin-1"))
+    first, second = slots[0].propertyName, slots[1].propertyName
+
+    def where(*extra):
+        result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(path), "refs", f"#{victim}", *extra])
+        assert result.exit_code == 0, result.output
+        return [line for line in result.output.splitlines() if line.startswith("#0")]
+
+    assert any(f".{first}[" in line for line in where()) and any(f".{second}" in line for line in where())
+    kept = where("--skip", first.upper())
+    assert not any(f".{first}[" in line for line in kept) and any(f".{second}" in line for line in kept)
+
+
+def test_removal_cli_chooses_by_name_and_lists_them():
+    db = load(str(TOASTCORE))
+    wizards = sorted(oid for oid, o in db.objects.items() if o.name.lower() == "wizard")
+    result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(TOASTCORE), "removal", "--name", "^wizard$"])
+    assert result.exit_code == 0, result.output
+    line = next(line for line in result.output.splitlines() if line.startswith("--name"))
+    assert line.startswith(f"--name ^wizard$: {len(wizards)}: #{wizards[0]} ")
+
+
 def test_removal_cli_reports_players_and_verb_owners():
     result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(TOASTCORE), "removal", "#2"])
     assert result.exit_code == 0, result.output

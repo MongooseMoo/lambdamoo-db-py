@@ -412,15 +412,33 @@ def census(ctx: click.Context, old: str | None, field: str, name_pattern: str | 
         click.echo(f"{n:>7} {b:>12}  #{key} {kind}{db.name_of(key) or ''}  e.g. {', '.join(examples)}")
 
 
+def _chosen(db, refs, owned_by, names_rx) -> tuple[set[int], dict[str, set[int]]]:
+    """Objects named by REFS, --owned-by (the owner and what it owns) and --name (by regex)."""
+    chosen = {_object(db, r).id for r in refs}
+    for r in owned_by:
+        owner = _object(db, r).id
+        chosen |= {owner} | {oid for oid, o in db.objects.items() if int(o.owner) == owner and not o.anon}
+    by_name = {}
+    for rx in names_rx:
+        pattern = re.compile(rx, re.I)
+        by_name[rx] = {oid for oid, o in db.objects.items() if not o.anon and pattern.search(o.name)}
+        chosen |= by_name[rx]
+    return chosen, by_name
+
+
 @moodb.command()
 @click.argument("refs", nargs=-1)
 @click.option("--owned-by", multiple=True, help="Also remove this object and everything it owns (repeatable).")
+@click.option("--with-contents", is_flag=True, help="Also remove everything located in a removed object, except players.")
+@click.option("--name", "names_rx", multiple=True, metavar="REGEX",
+              help="Also remove every object whose name matches (case-insensitive, repeatable).")
 @click.option("--limit", default=40, show_default=True, help="Inbound references to list.")
 @click.pass_context
-def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...], limit: int) -> None:
+def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...], with_contents: bool,
+            names_rx: tuple[str, ...], limit: int) -> None:
     """What removing objects would leave pointing at nothing.
 
-    The set is closed over descendants. Every slot outside the set that names
+    The set is closed over descendants (and contents, with --with-contents). Every slot outside the set that names
     a removed object is listed by field, holder and target; entries in
     .owned_objects/.lost_souls and in children/contents lists are only
     counted, since the rewrite drops them. Also lists objects located inside
@@ -431,14 +449,15 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
     if ctx.obj["path"] is None:
         raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
     db = load(ctx.obj["path"])
-    chosen = {_object(db, r).id for r in refs}
-    for r in owned_by:
-        owner = _object(db, r).id
-        chosen |= {owner} | {oid for oid, o in db.objects.items() if int(o.owner) == owner and not o.anon}
+    chosen, by_name = _chosen(db, refs, owned_by, names_rx)
     if not chosen:
-        raise click.UsageError("name objects to remove, or --owned-by")
-    p = plan(db, chosen)
-    click.echo(f"remove {len(p.removed)} objects: {len(p.chosen)} chosen, {len(p.descendants)} descendants")
+        raise click.UsageError("name objects to remove, or --owned-by / --name")
+    p = plan(db, chosen, with_contents)
+    click.echo(f"remove {len(p.removed)} objects: {len(p.chosen)} chosen, {len(p.descendants)} descendants"
+               + (f", {len(p.contents)} contents" if with_contents else ""))
+    for rx, found in by_name.items():
+        click.echo(f"--name {rx}: {len(found)}: " + ", ".join(label(db, x) for x in sorted(found)[:limit])
+                   + (" ..." if len(found) > limit else ""))
     if p.players:
         click.echo("players removed: " + ", ".join(label(db, x) for x in sorted(p.players)))
     click.echo(f"inbound references from outside: {sum(p.inbound.values())} slots")
@@ -468,11 +487,15 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
 @click.option("--owned-by", multiple=True, help="Also remove this object and everything it owns (repeatable).")
 @click.option("--owner-to", help="Give surviving objects, verbs and properties owned by removed objects to this object.")
 @click.option("--strand-to", help="Move surviving objects located in removed ones here (#-1 for nowhere).")
+@click.option("--with-contents", is_flag=True, help="Also remove everything located in a removed object, except players.")
+@click.option("--name", "names_rx", multiple=True, metavar="REGEX",
+              help="Also remove every object whose name matches (case-insensitive, repeatable).")
 @click.option("--empty", "empties", multiple=True, metavar="REF.NAME",
               help="Empty this property's value (same type) and clear descendants' own values; repeatable.")
 @click.pass_context
 def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple[str, ...],
-            owner_to: str | None, strand_to: str | None, empties: tuple[str, ...]) -> None:
+            owner_to: str | None, strand_to: str | None, with_contents: bool, names_rx: tuple[str, ...],
+            empties: tuple[str, ...]) -> None:
     """Write OUT: the dump without the named objects, numbered densely.
 
     Removes the objects (and their descendants), numbers the rest #0.. in their
@@ -492,10 +515,7 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
     if Path(out).resolve() == Path(ctx.obj["path"]).resolve():
         raise click.UsageError("OUT must not be the dump being read")
     db = load(ctx.obj["path"])
-    chosen = {_object(db, r).id for r in refs}
-    for r in owned_by:
-        owner = _object(db, r).id
-        chosen |= {owner} | {oid for oid, o in db.objects.items() if int(o.owner) == owner and not o.anon}
+    chosen, _ = _chosen(db, refs, owned_by, names_rx)
     target = {"owner_to": owner_to, "strand_to": strand_to}
     resolved = {k: (int(v[1:]) if v.startswith("#-") else _object(db, v).id) if v else None for k, v in target.items()}
     emptied = []
@@ -505,14 +525,15 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
             if not ref or not name:
                 raise click.UsageError(f"--empty wants REF.NAME, got {spec!r}")
             emptied.append(f"{spec} {empty_property(db, _object(db, ref).id, name)}")
-        report = rewrite_db(db, chosen, **resolved)
+        report = rewrite_db(db, chosen, **resolved, with_contents=with_contents)
     except RewriteRefused as e:
         raise click.ClickException(str(e)) from e
     with open(out, "w", encoding="latin-1", newline="") as f:
         Writer(db=db, output_file=f).writeDatabase()
     Path(out + ".map.json").write_text(json.dumps({"base": report.base, "map": report.renumbered}))
     p = report.plan
-    click.echo(f"removed {len(p.removed)} objects ({len(p.chosen)} chosen, {len(p.descendants)} descendants); "
+    click.echo(f"removed {len(p.removed)} objects ({len(p.chosen)} chosen, {len(p.descendants)} descendants, "
+               f"{len(p.contents)} contents); "
                f"{db.total_objects} permanent objects now, highest #{db.total_objects - 1}")
     click.echo(f"dead numbers: base {report.base}; {sum(report.dead_slots.values())} slots")
     for field, n in report.dead_slots.most_common():
@@ -843,6 +864,19 @@ def keys(ctx: click.Context, spec: str) -> None:
         click.echo(f"{kind:<8} {n:>8} {nbytes:>12}  e.g. {', '.join(examples)}")
 
 
+def _clip(text: str, width: int, rx: re.Pattern[str] | None = None) -> str:
+    """``text`` cut to ``width`` characters around the first match of ``rx``; 0 keeps it whole."""
+    if not width or len(text) <= width:
+        return text
+    m = rx.search(text) if rx else None
+    start = max(0, min(m.start() - width // 2, len(text) - width)) if m else 0
+    return ("..." if start else "") + text[start:start + width] + f"... [{len(text)} chars]"
+
+
+WIDTH = click.option("--width", default=400, show_default=True, metavar="N",
+                     help="Cut code lines longer than N characters around the match; 0 prints them whole.")
+
+
 @moodb.command()
 @click.argument("pattern")
 @click.option("-o", "--obj", "objs", multiple=True, help="Only search these objects (repeatable).")
@@ -854,9 +888,10 @@ def keys(ctx: click.Context, spec: str) -> None:
               help="Only verbs NAME would call, by MOO name matching (repeatable).")
 @click.option("-L", "--verbs-without-match", is_flag=True,
               help="Print each verb with a program and no matching line, once.")
+@WIDTH
 @click.pass_context
 def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool,
-         context: int, verb_names: tuple[str, ...], verbs_without_match: bool) -> None:
+         context: int, verb_names: tuple[str, ...], verbs_without_match: bool, width: int) -> None:
     """Search verb code (Python regex): #OBJ:[index] name:LINE: text."""
     db, names = _db(ctx)
     selected = [_object(db, r) for r in objs] or None
@@ -885,7 +920,7 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
             continue
         if not context:
             for h in hits:
-                click.echo(f"#{o.id}:[{idx}] {_alias(v)}:{h.lineno}: {h.line.strip()}")
+                click.echo(f"#{o.id}:[{idx}] {_alias(v)}:{h.lineno}: {_clip(h.line.strip(), width, rx)}")
             continue
         if n_group:
             click.echo("--")
@@ -896,7 +931,7 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
             if prev is not None and n != prev + 1:
                 click.echo("--")
             sep = ":" if n in matched else "-"
-            click.echo(f"#{o.id}:[{idx}] {_alias(v)}{sep}{n}{sep} {code_lines[n - 1].strip()}")
+            click.echo(f"#{o.id}:[{idx}] {_alias(v)}{sep}{n}{sep} {_clip(code_lines[n - 1].strip(), width, rx)}")
 
 
 @moodb.command()
@@ -1058,8 +1093,11 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
 @moodb.command()
 @click.argument("ref", nargs=-1, required=True)
 @click.option("--code", "code_only", is_flag=True, help="Only verb code naming it; leave out property values holding it.")
+@click.option("--skip", "skipped", multiple=True, metavar="NAME",
+              help="Leave out references held in properties with this name (case-insensitive, repeatable).")
+@WIDTH
 @click.pass_context
-def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool) -> None:
+def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool, skipped: tuple[str, ...], width: int) -> None:
     """Find references to an object: property values holding it, and verb code naming #N or its $name.
 
     Several REFs are answered in one run, each under an `== REF` line.
@@ -1069,10 +1107,14 @@ def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool) -> None:
     for one, target in zip(ref, targets):
         if len(ref) > 1:
             click.echo(f"== {one}")
+        number = re.compile(rf"#{target.id}(?!\d)")
+        skip = re.compile(r"\.(" + "|".join(re.escape(s) for s in skipped) + r")(?=[\[.]|$)", re.I) if skipped else None
         for r in find_references(db, target, names):
             if code_only and not r.where.startswith(":["):
                 continue
-            click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {r.text}" if r.text else ""))
+            if skip and skip.match(r.where):
+                continue
+            click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {_clip(r.text, width, number)}" if r.text else ""))
 
 
 @moodb.command()

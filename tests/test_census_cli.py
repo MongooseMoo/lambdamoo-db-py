@@ -46,6 +46,19 @@ def test_grep_verb_and_verbs_without_match():
     assert all('"' in line and ":[" in line for line in every)
 
 
+def test_clip_keeps_short_lines_and_cuts_long_ones_around_the_match():
+    import re
+
+    from lambdamoo_db.cli import _clip
+
+    assert _clip("short", 10) == "short"
+    long = "a" * 50 + "#123" + "b" * 50
+    assert _clip(long, 0) == long
+    cut = _clip(long, 20, re.compile("#123"))
+    assert "#123" in cut and cut.startswith("...") and cut.endswith("... [104 chars]")
+    assert _clip(long, 20).startswith("a" * 20 + "...")
+
+
 def test_format_time_takes_any_task_time():
     from lambdamoo_db.inspection import format_time
 

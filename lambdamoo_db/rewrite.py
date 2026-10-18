@@ -51,8 +51,8 @@ class Report:
 
 
 def rewrite(db: MooDatabase, chosen: Iterable[int], owner_to: int | None = None,
-            strand_to: int | None = None) -> Report:
-    p = plan(db, chosen)
+            strand_to: int | None = None, with_contents: bool = False) -> Report:
+    p = plan(db, chosen, with_contents)
     removed = p.removed
     base = _dead_base(db)
     reassigned = _reassign(db, p, owner_to, strand_to)

@@ -1,6 +1,7 @@
 """What removing a set of objects from a dump would leave pointing at nothing.
 
-``plan(db, chosen)`` closes the set (an object goes with all its descendants) and walks every
+``plan(db, chosen)`` closes the set (an object goes with all its descendants and, with
+``with_contents``, everything located in it except players and objects older than it) and walks every
 object-number slot with ``objnums.remap``. A slot naming a removed object from a holder that stays is
 an inbound reference: the removal is clean only when there are none, apart from entries in the
 set-like lists named in ``SET_LISTS``, which the rewrite drops.
@@ -13,6 +14,7 @@ from typing import Any
 import attrs
 
 from .database import MooDatabase, WaifReference
+from .inspection import LookupFailed, lookup_property
 from .objnums import remap
 
 # Properties whose value is a set of objects kept for bookkeeping: an entry naming a removed object is
@@ -32,19 +34,35 @@ class Plan:
     dropped: Counter  # set-list property or structural field -> entries dropped
     stranded: dict[int, int]  # object outside the set -> the removed object it is located in
     players: set[int]  # removed objects that are players
+    contents: set[int] = attrs.Factory(set)  # added because it is located in a removed object
 
 
-def plan(db: MooDatabase, chosen: Iterable[int]) -> Plan:
+def plan(db: MooDatabase, chosen: Iterable[int], with_contents: bool = False) -> Plan:
     """The closed removal set for ``chosen`` and every reference into it from outside."""
     chosen = {int(c) for c in chosen}
+    players = {int(p) for p in db.players}
     removed = set(chosen)
-    todo = list(chosen)
+    descendants: set[int] = set()
+    contents: set[int] = set()
+    # Contents go only if made no earlier than the chosen object they are inside (the rule
+    # $blueprint:recycle_test_ship applies): an older object was moved in and is not part of it.
+    todo = [(c, _created(db, c)) for c in chosen]
     while todo:
-        o = db.objects.get(todo.pop())
-        for child in o.children if o is not None else ():
-            if int(child) not in removed:
-                removed.add(int(child))
-                todo.append(int(child))
+        oid, since = todo.pop()
+        o = db.objects.get(oid)
+        if o is None:
+            continue
+        added = [(int(c), descendants, since) for c in o.children]
+        if with_contents and since is not None:
+            for c in o.contents:
+                made = _created(db, int(c))
+                if int(c) not in players and made is not None and made >= since:
+                    added.append((int(c), contents, since))
+        for child, how, root in added:
+            if child not in removed:
+                removed.add(child)
+                how.add(child)
+                todo.append((child, root))
     holders = waif_holders(db)
     inbound: Counter = Counter()
     dropped: Counter = Counter()
@@ -65,8 +83,19 @@ def plan(db: MooDatabase, chosen: Iterable[int]) -> Plan:
     remap(db, visit)
     stranded = {oid: int(o.location) for oid, o in db.objects.items()
                 if oid not in removed and int(o.location) in removed}
-    players = removed & {int(p) for p in db.players}
-    return Plan(removed, chosen, removed - chosen, inbound, dropped, stranded, players)
+    return Plan(removed, chosen, descendants, inbound, dropped, stranded, removed & players, contents)
+
+
+def _created(db: MooDatabase, oid: int) -> int | None:
+    """The object's `creation_time` property, or None when it has none or it is not a number."""
+    o = db.objects.get(oid)
+    if o is None:
+        return None
+    try:
+        value = lookup_property(db, o, "creation_time").value
+    except LookupFailed:
+        return None
+    return value if isinstance(value, int) else None
 
 
 def waif_holders(db: MooDatabase) -> dict[int, set[int]]:
