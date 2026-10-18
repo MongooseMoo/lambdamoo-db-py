@@ -433,9 +433,10 @@ def _leading_comments(code) -> list[str]:
 @click.option("-i", "--inherited", is_flag=True, help="Also list commands of every ancestor.")
 @click.option("--lines", type=click.IntRange(min=0), default=3, show_default=True,
               help="How many of each command's opening comment lines to show.")
+@click.option("--brief", is_flag=True, help="One line per object: its name and each command's first name.")
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 @click.pass_context
-def commands(ctx: click.Context, refs: tuple[str, ...], inherited: bool, lines: int, fmt: str) -> None:
+def commands(ctx: click.Context, refs: tuple[str, ...], inherited: bool, lines: int, brief: bool, fmt: str) -> None:
     """What players can type at each object: verbs other than `this none this`, with their opening comments."""
     db, names = _db(ctx)
     records = []
@@ -453,6 +454,11 @@ def commands(ctx: click.Context, refs: tuple[str, ...], inherited: bool, lines: 
         records.append(record)
     if fmt == "json":
         click.echo(json.dumps(records, ensure_ascii=True))
+        return
+    if brief:
+        for record in records:
+            names = " ".join(c["names"].split()[0] for c in record["commands"] if c["names"].split())
+            click.echo(f"#{record['object']} {record['name']}: {names}")
         return
     for record in records:
         chain = " > ".join(f"#{n} {db.name_of(n)}" for n in record["parents"])

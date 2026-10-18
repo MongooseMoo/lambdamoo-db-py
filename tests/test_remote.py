@@ -163,6 +163,8 @@ def test_built_database_reads_back_with_moodb(tmp_path):
         '  #5:[1] "stand"  this none none',
         '  #5:[2] "count"  this any any',
     ]
+    brief = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "commands", "#5", "--brief"])
+    assert brief.output == "#5 Generic Seat: sit stand count\n"
     verbs = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "verbs", "#5"])
     assert verbs.exit_code == 0, verbs.output
     assert "any on top of/on/onto/upon this" in verbs.output
