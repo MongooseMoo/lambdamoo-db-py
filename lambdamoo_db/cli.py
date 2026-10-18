@@ -412,6 +412,32 @@ def census(ctx: click.Context, old: str | None, field: str, name_pattern: str | 
         click.echo(f"{n:>7} {b:>12}  #{key} {kind}{db.name_of(key) or ''}  e.g. {', '.join(examples)}")
 
 
+SET_OPTIONS = ("--owned-by", "--name", "--empty")
+
+
+def _read_set(path: str | None) -> dict[str, list]:
+    """A removal set kept in a file, one entry per line: a REF, `--owned-by REF`, `--name REGEX` (the rest
+    of the line, spaces included), `--empty REF.NAME` or `--with-contents`. Blank lines and lines starting
+    with `;` are skipped."""
+    found: dict[str, list] = {"refs": [], "--owned-by": [], "--name": [], "--empty": [], "--with-contents": []}
+    if path is None:
+        return found
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith(";"):
+            continue
+        word, _, rest = line.partition(" ")
+        if word == "--with-contents" and not rest:
+            found[word].append(True)
+        elif word in SET_OPTIONS and rest.strip():
+            found[word].append(rest.strip())
+        elif not word.startswith("-") and not rest:
+            found["refs"].append(word)
+        else:
+            raise click.UsageError(f"{path}:{n}: not a set entry: {line!r}")
+    return found
+
+
 def _chosen(db, refs, owned_by, names_rx) -> tuple[set[int], dict[str, set[int]]]:
     """Objects named by REFS, --owned-by (the owner and what it owns) and --name (by regex)."""
     chosen = {_object(db, r).id for r in refs}
@@ -435,9 +461,12 @@ def _chosen(db, refs, owned_by, names_rx) -> tuple[set[int], dict[str, set[int]]
 @click.option("--limit", default=40, show_default=True, help="Inbound references to list (0 = all).")
 @click.option("--field", "fields", multiple=True,
               help="List only the inbound references in this field, as the counts name it (repeatable).")
+@click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
+              help="Read more of the set from FILE: one REF, --owned-by REF, --name REGEX or --with-contents "
+                   "per line (--empty lines are for rewrite and ignored here); ; starts a comment.")
 @click.pass_context
 def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...], with_contents: bool,
-            names_rx: tuple[str, ...], limit: int | None, fields: tuple[str, ...]) -> None:
+            names_rx: tuple[str, ...], limit: int | None, fields: tuple[str, ...], set_file: str | None) -> None:
     """What removing objects would leave pointing at nothing.
 
     The set is closed over descendants (and contents, with --with-contents). Every slot outside the set that names
@@ -450,8 +479,11 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
 
     if ctx.obj["path"] is None:
         raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    kept = _read_set(set_file)
+    with_contents = with_contents or bool(kept["--with-contents"])
     db = load(ctx.obj["path"])
-    chosen, by_name = _chosen(db, refs, owned_by, names_rx)
+    chosen, by_name = _chosen(db, (*refs, *kept["refs"]), (*owned_by, *kept["--owned-by"]),
+                              (*names_rx, *kept["--name"]))
     if not chosen:
         raise click.UsageError("name objects to remove, or --owned-by / --name")
     p = plan(db, chosen, with_contents)
@@ -496,10 +528,13 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
               help="Also remove every object whose name matches (case-insensitive, repeatable).")
 @click.option("--empty", "empties", multiple=True, metavar="REF.NAME",
               help="Empty this property's value (same type) and clear descendants' own values; repeatable.")
+@click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
+              help="Read more of the set from FILE: one REF, --owned-by REF, --name REGEX, --empty REF.NAME or "
+                   "--with-contents per line; ; starts a comment.")
 @click.pass_context
 def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple[str, ...],
             owner_to: str | None, strand_to: str | None, with_contents: bool, names_rx: tuple[str, ...],
-            empties: tuple[str, ...]) -> None:
+            empties: tuple[str, ...], set_file: str | None) -> None:
     """Write OUT: the dump without the named objects, numbered densely.
 
     Removes the objects (and their descendants), numbers the rest #0.. in their
@@ -518,8 +553,11 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
         raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
     if Path(out).resolve() == Path(ctx.obj["path"]).resolve():
         raise click.UsageError("OUT must not be the dump being read")
+    kept = _read_set(set_file)
+    with_contents = with_contents or bool(kept["--with-contents"])
+    empties = (*empties, *kept["--empty"])
     db = load(ctx.obj["path"])
-    chosen, _ = _chosen(db, refs, owned_by, names_rx)
+    chosen, _ = _chosen(db, (*refs, *kept["refs"]), (*owned_by, *kept["--owned-by"]), (*names_rx, *kept["--name"]))
     target = {"owner_to": owner_to, "strand_to": strand_to}
     resolved = {k: (int(v[1:]) if v.startswith("#-") else _object(db, v).id) if v else None for k, v in target.items()}
     emptied = []

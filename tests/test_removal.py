@@ -143,6 +143,22 @@ def test_removal_cli_reports_players_and_verb_owners():
     assert any(line.split() == ["1010", "verb.owner"] for line in lines)
 
 
+def test_a_set_file_chooses_what_the_same_options_would(tmp_path):
+    def run(*args):
+        return CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(TOASTCORE), "removal", *args])
+
+    typed = run("#2", "--name", "^generic player$", "--with-contents")
+    assert typed.exit_code == 0, typed.output
+    kept = tmp_path / "set.txt"
+    kept.write_text("; the wizard\n#2\n\n--name ^generic player$\n--with-contents\n--empty #0.x\n", encoding="utf-8")
+    from_file = run("--set", str(kept))
+    assert from_file.exit_code == 0, from_file.output
+    assert from_file.output == typed.output
+    kept.write_text("#2 #3\n", encoding="utf-8")
+    refused = run("--set", str(kept))
+    assert refused.exit_code != 0 and "set.txt:1: not a set entry" in refused.output
+
+
 def test_removal_cli_field_lists_only_that_fields_slots():
     def listed(*extra):
         result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(TOASTCORE), "removal", "#2", *extra])
