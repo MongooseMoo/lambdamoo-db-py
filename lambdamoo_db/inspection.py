@@ -14,7 +14,7 @@ import hashlib
 import re
 from collections import Counter, deque
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 import attrs
 
@@ -355,15 +355,71 @@ class GrepHit:
     line: str
 
 
-def grep_verbs(db: MooDatabase, pattern: re.Pattern[str], objs: list[MooObject] | None = None) -> Iterator[GrepHit]:
-    """Yield a hit for every verb code line matching pattern."""
+def mask_moo_strings(lines: list[str]) -> list[str]:
+    """Mask string literals (including MOO's comment statements), preserving positions.
+
+    This is lexical filtering, not a parser or proof that a branch executes.
+    Escapes consume the next character inside strings. State crosses lines so
+    unusual stored source cannot accidentally expose a string's contents.
+    """
+    quoted = escaped = False
+    result = []
+    for line in lines:
+        masked = []
+        for char in line:
+            if quoted:
+                masked.append(' ')
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+            elif char == '"':
+                masked.append(' ')
+                quoted = True
+            else:
+                masked.append(char)
+        result.append(''.join(masked))
+        escaped = False  # physical line boundary is not an escaped quote
+    return result
+
+
+def grep_verbs(db: MooDatabase, pattern: re.Pattern[str], objs: list[MooObject] | None = None, *,
+               require: Sequence[re.Pattern[str]] = (), exclude: Sequence[re.Pattern[str]] = (),
+               code_only: bool = False, owners: set[int] | None = None,
+               wizard_owned: bool = False, executable: bool = False) -> Iterator[GrepHit]:
+    """Yield matching source lines, with optional whole-verb and metadata filters.
+
+    Every require pattern must match some line; any exclude match omits the
+    whole verb. Returned evidence is always original source, with 1-based
+    line numbers. Owners refer to verb owners, not the containing object's
+    owner. Missing owners never satisfy wizard_owned.
+    """
     if objs is None:
         objs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+    wizard_ids = {o.id for o in object_heads(db) if o.flags & ObjectFlags.WIZARD} if wizard_owned else set()
+    seen = set()
     for o in objs:
+        if o.id in seen:
+            continue
+        seen.add(o.id)
         for idx, v in enumerate(o.verbs):
-            for n, line in enumerate(v.code or [], 1):
+            if owners is not None and int(v.owner) not in owners:
+                continue
+            if wizard_owned and int(v.owner) not in wizard_ids:
+                continue
+            if executable and not v.perms & VERB_EXEC:
+                continue
+            original = v.code or []
+            lines = mask_moo_strings(original) if code_only else original
+            if any(not any(rx.search(line) for line in lines) for rx in require):
+                continue
+            if any(rx.search(line) for rx in exclude for line in lines):
+                continue
+            for n, line in enumerate(lines, 1):
                 if pattern.search(line):
-                    yield GrepHit(o, idx, v, n, line)
+                    yield GrepHit(o, idx, v, n, original[n - 1])
 
 
 def _verb_keys(obj: MooObject) -> dict[tuple[str, str, int], tuple[int, Verb]]:
