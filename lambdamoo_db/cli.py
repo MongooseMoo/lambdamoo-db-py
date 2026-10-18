@@ -238,8 +238,9 @@ _OBJECT_HEADER = re.compile(rb"#-?\d+( recycled)?")
 @click.option("--max-diffs", default=20, show_default=True, help="Stop listing after this many differing lines.")
 @click.option("--show", default=0, show_default=True,
               help="Print this many lines of both texts from the first difference on. They may hold secrets.")
+@click.option("--remap", is_flag=True, help="Pass every object number through the renumbering walk, unchanged, first.")
 @click.pass_context
-def roundtrip(ctx: click.Context, max_diffs: int, show: int) -> None:
+def roundtrip(ctx: click.Context, max_diffs: int, show: int, remap: bool) -> None:
     """Write the dump back out in memory and check it reproduces the file byte for byte.
 
     A differing line is reported by its number, its two lengths and the nearest
@@ -248,13 +249,17 @@ def roundtrip(ctx: click.Context, max_diffs: int, show: int) -> None:
     """
     from io import StringIO
 
+    from .objnums import remap as remap_numbers
     from .writer import Writer
 
     if ctx.obj["path"] is None:
         raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
     original = Path(ctx.obj["path"]).read_bytes()
+    db = load(ctx.obj["path"])
+    if remap:
+        remap_numbers(db, lambda kind, number, where: number)
     output = StringIO()
-    Writer(db=load(ctx.obj["path"]), output_file=output).writeDatabase()
+    Writer(db=db, output_file=output).writeDatabase()
     written = output.getvalue().encode("latin-1")
     if written == original:
         click.echo(f"identical: {len(original)} bytes")
@@ -279,6 +284,47 @@ def roundtrip(ctx: click.Context, max_diffs: int, show: int) -> None:
                            + (f", after header {header}" if header else ""))
     click.echo(f"{total} differing lines among the first {min(len(old_lines), len(new_lines))}")
     ctx.exit(1)
+
+
+def _slot_label(where: tuple) -> str:
+    """The field an object-number slot is in: `object.owner`, `object.property.value`, `queuedTasks.activation.rtEnv`."""
+    head, rest = where[0], list(where[1:])
+    if isinstance(head, str) and head.startswith(("#", "anon ")):
+        label = "anon" if head.startswith("anon ") else "object"
+        if rest and isinstance(rest[0], str) and rest[0][:1] in ".:":
+            label += ".property" if rest.pop(0)[0] == "." else ".verb"
+        return f"{label}.{rest[0]}" if rest else label
+    return ".".join(s for s in where if isinstance(s, str) and s not in ("key", "value"))
+
+
+@moodb.command()
+@click.pass_context
+def slots(ctx: click.Context) -> None:
+    """Count every slot holding an object number, by field.
+
+    Columns: slots; how many hold a negative number (#-1 and the like); how many
+    name a permanent object that does not exist (recycled or past the end).
+    The fields are those the renumbering walk rewrites.
+    """
+    from .objnums import remap as remap_numbers
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = load(ctx.obj["path"])
+    permanent = {oid for oid, o in db.objects.items() if not o.anon}
+    counts: dict[tuple[str, str], list[int]] = {}
+
+    def count(kind: str, number: int, where: tuple) -> int:
+        row = counts.setdefault((kind, _slot_label(where)), [0, 0, 0])
+        row[0] += 1
+        row[1] += number < 0
+        row[2] += kind == "object" and number >= 0 and number not in permanent
+        return number
+
+    remap_numbers(db, count)
+    click.echo(f"{'kind':<7} {'field':<44} {'slots':>10} {'negative':>9} {'missing':>8}")
+    for (kind, label), (total, negative, missing) in sorted(counts.items()):
+        click.echo(f"{kind:<7} {label:<44} {total:>10} {negative:>9} {missing:>8}")
 
 
 @moodb.command()
