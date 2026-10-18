@@ -231,6 +231,56 @@ def info(ctx: click.Context) -> None:
     click.echo(f"waifs     {len(db.waifs)}")
 
 
+_OBJECT_HEADER = re.compile(rb"#-?\d+( recycled)?")
+
+
+@moodb.command()
+@click.option("--max-diffs", default=20, show_default=True, help="Stop listing after this many differing lines.")
+@click.option("--show", default=0, show_default=True,
+              help="Print this many lines of both texts from the first difference on. They may hold secrets.")
+@click.pass_context
+def roundtrip(ctx: click.Context, max_diffs: int, show: int) -> None:
+    """Write the dump back out in memory and check it reproduces the file byte for byte.
+
+    A differing line is reported by its number, its two lengths and the nearest
+    object header before it, never by its text unless --show asks: dumps hold
+    secrets. Exits 1 when the bytes differ.
+    """
+    from io import StringIO
+
+    from .writer import Writer
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    original = Path(ctx.obj["path"]).read_bytes()
+    output = StringIO()
+    Writer(db=load(ctx.obj["path"]), output_file=output).writeDatabase()
+    written = output.getvalue().encode("latin-1")
+    if written == original:
+        click.echo(f"identical: {len(original)} bytes")
+        return
+    old_lines, new_lines = original.split(b"\n"), written.split(b"\n")
+    click.echo(f"differs: original {len(original)} bytes, {len(old_lines)} lines; "
+               f"written {len(written)} bytes, {len(new_lines)} lines")
+    header, shown, total = None, 0, 0
+    for number, (old, new) in enumerate(zip(old_lines, new_lines), 1):
+        if _OBJECT_HEADER.fullmatch(old):
+            header = old.decode("latin-1")
+        if old != new:
+            if total == 0 and show:
+                for side, lines in (("original", old_lines), ("written", new_lines)):
+                    click.echo(f"{side} from line {number}:")
+                    for line in lines[number - 1:number - 1 + show]:
+                        click.echo(f"  {line.decode('latin-1')}")
+            total += 1
+            if shown < max_diffs:
+                shown += 1
+                click.echo(f"line {number}: original {len(old)} bytes, written {len(new)} bytes"
+                           + (f", after header {header}" if header else ""))
+    click.echo(f"{total} differing lines among the first {min(len(old_lines), len(new_lines))}")
+    ctx.exit(1)
+
+
 @moodb.command()
 @click.argument("ref")
 @click.pass_context

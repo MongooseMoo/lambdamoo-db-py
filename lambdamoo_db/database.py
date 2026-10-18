@@ -1,6 +1,6 @@
 from typing import Any, Generator
 import attrs
-from .enums import MooTypes, ObjectFlags, PropertyFlags
+from .enums import ObjectFlags, PropertyFlags
 
 
 @attrs.frozen(repr=False)
@@ -83,6 +83,7 @@ class MooObject:
     owner: int
     location: int
     parents: list[int] = attrs.field(factory=list)
+    parents_listed: bool = attrs.field(init=False, default=False)  # The dump stored parents as a list, even of one or none
     children: list[int] = attrs.field(init=False, factory=list)
     last_move: int = attrs.field(init=False, default=-1)
     contents: list[int] = attrs.field(init=False, factory=list)
@@ -193,18 +194,6 @@ class InterruptedTask:
     id: int
     status: str
     vm: VM = attrs.field(init=False, default=None)
-
-
-TYPE_MAPPING = {
-    int: MooTypes.INT,
-    str: MooTypes.STR,
-    ObjNum: MooTypes.OBJ,
-    float: MooTypes.FLOAT,
-    list: MooTypes.LIST,
-    dict: MooTypes.MAP,
-    bool: MooTypes.BOOL,
-    type(None): MooTypes.NONE,
-}
 
 
 @attrs.define
