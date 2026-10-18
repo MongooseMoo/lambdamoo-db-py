@@ -786,9 +786,15 @@ def frame_text(a: Activation) -> str:
     return f"#{a.vloc}:{a.verb} (this #{a.this}, player #{a.player})"
 
 
+# suspend() with no timeout: the server stores INTNUM_MAX (toaststunt tasks.cc bf_suspend).
+INDEFINITE_SUSPEND = 2**63 - 1
+
+
 def format_time(seconds: int | None) -> str:
     if seconds is None:
         return "-"
+    if seconds == INDEFINITE_SUSPEND:
+        return "until resumed"
     return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
 
