@@ -139,6 +139,28 @@ explicit offline data inspection: possession of a dump bypasses live mailbox
 permissions. Select only the mail relevant to the task; message contents and
 names can be private. JSON dates are original Unix timestamps; text uses UTC.
 
+### Reading a live MOO over telnet
+
+```sh
+moodb remote census lambda.jsonl --host lambda.moo.mud.org --port 8888 \
+    --user Rindalin --password-file ~/.config/lambdamoo/rindalin
+moodb remote rank lambda.jsonl --fertile --top 100      # generics their authors invite children of
+moodb remote rank lambda.jsonl --name sittable           # name contains, any case
+moodb remote rank lambda.jsonl --owner 2 --format json
+```
+
+`remote census` connects one character (it needs the programmer bit) and walks
+object numbers in blocks with one eval each, pausing between evals. Each valid
+object becomes one JSON line: name, owner, parent, the `r` and `f` flags,
+whether it is a player, verb and readable-verb counts, property count and
+child count. A count of -1 means the object is unreadable to that character.
+Every eval ends with the number of rows the server sent, and a mismatch (for
+example lines lost to the server's output buffer) stops the run. Rerunning
+continues after the last finished block. The password is read from a file and
+never printed. `remote rank` lists objects with readable verbs, fertile first,
+then by readable verbs, then by children; players are left out unless
+`--players` is given.
+
 ### Reading relationships sideways
 
 ```sh

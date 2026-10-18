@@ -1273,3 +1273,7 @@ register_graph(moodb)
 from .mail_cli import register_mail
 
 register_mail(moodb, _db)
+
+from .remote_cli import register_remote
+
+register_remote(moodb)

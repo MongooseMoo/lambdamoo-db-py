@@ -1,0 +1,138 @@
+import io
+import json
+import re
+import socket
+import threading
+
+import pytest
+from click.testing import CliRunner
+
+from lambdamoo_db.cli import moodb
+from lambdamoo_db.remote import CENSUS_BLOCK, Err, Obj, RemoteError, Session, census, parse_literal, rank, read_census
+
+
+def test_parse_literal_reads_every_value_kind():
+    text = '{1, -2, 3.5, #7, #-1, "a \\"q\\" \\\\ b", E_PERM, {}, {{}}, ["k" -> 1, 2 -> {#3}]}'
+    assert parse_literal(text) == [1, -2, 3.5, Obj(7), Obj(-1), 'a "q" \\ b', Err("E_PERM"), [], [[]],
+                                   {"k": 1, 2: [Obj(3)]}]
+
+
+def test_parse_literal_rejects_trailing_text():
+    with pytest.raises(ValueError):
+        parse_literal("{1} 2")
+
+
+class FakeMoo:
+    """A telnet peer that answers each eval line with the lines REPLY(line) returns."""
+
+    def __init__(self, reply):
+        self.server = socket.socket()
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen(1)
+        self.port = self.server.getsockname()[1]
+        self.received = []
+        self.reply = reply
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        conn, _ = self.server.accept()
+        conn.sendall(b"Welcome\r\n")
+        buffer = b""
+        while True:
+            data = conn.recv(65536)
+            if not data:
+                return
+            buffer += data
+            while b"\r\n" in buffer:
+                line, buffer = buffer.split(b"\r\n", 1)
+                line = line.decode("latin-1")
+                self.received.append(line)
+                for out in self.reply(line):
+                    conn.sendall(out.encode("latin-1") + b"\r\n")
+
+
+def marker(line):
+    return re.search(r'"(@@moodb [0-9a-f]+ )"', line).group(1)
+
+
+def session(fake):
+    return Session("127.0.0.1", fake.port, timeout=5, greeting_quiet=0.1)
+
+
+def test_eval_rows_collects_marked_lines_and_ignores_chatter():
+    def reply(line):
+        if not line.startswith(";;"):
+            return []
+        head = marker(line)
+        return ["Somebody pages you.", head + "{#1, \"x\"}", head + "{#2, \"y\"}", head + "end 2"]
+
+    fake = FakeMoo(reply)
+    rows = session(fake).eval_rows('for o in [#1..#2] __emit({o, "x"}); endfor')
+    assert rows == [[Obj(1), "x"], [Obj(2), "y"]]
+    assert "__n = __n + 1; notify(player," in fake.received[-1]
+
+
+def test_eval_rows_fails_when_a_line_was_lost():
+    def reply(line):
+        head = marker(line)
+        return [head + "{1}", head + "end 2"]
+
+    with pytest.raises(RemoteError, match="sent 2 rows, received 1"):
+        session(FakeMoo(reply)).eval_rows("__emit(1); __emit(2);")
+
+
+def test_eval_rows_raises_the_server_traceback():
+    def reply(line):
+        return ["#-1:Input to EVAL, line 3:  Permission denied", "... called from built-in function eval()",
+                "(End of traceback)"]
+
+    with pytest.raises(RemoteError, match="Permission denied"):
+        session(FakeMoo(reply)).eval_rows("__emit(verbs(#1));")
+
+
+def test_census_writes_rows_and_block_records(tmp_path):
+    def reply(line):
+        head = marker(line)
+        first = int(re.search(r"\[#(\d+)\.\.", line).group(1))
+        return [head + f'{{#{first}, "Generic Thing {first}", #2, #1, 1, 1, 0, 4, 3, 2, 9}}', head + "end 1"]
+
+    out = io.StringIO()
+    census(session(FakeMoo(reply)), 0, 9, 5, out, pause=0)
+    path = tmp_path / "c.jsonl"
+    path.write_text(out.getvalue(), encoding="ascii")
+    rows, blocks = read_census(path)
+    assert blocks == [(0, 4), (5, 9)]
+    assert rows[5] == {"object": 5, "name": "Generic Thing 5", "owner": 2, "parent": 1, "readable": True,
+                       "fertile": True, "player": False, "verbs": 4, "readable_verbs": 3, "properties": 2,
+                       "children": 9}
+
+
+def test_census_block_program_emits_one_row_per_object():
+    program = CENSUS_BLOCK.format(first=10, last=20)
+    assert program.startswith("for o in [#10..#20]")
+    assert program.count("__emit(") == 1 and "}); endif endfor" in program
+
+
+def rows_file(tmp_path, rows):
+    path = tmp_path / "census.jsonl"
+    base = {"owner": 2, "parent": 1, "readable": True, "player": False, "verbs": 5, "properties": 0}
+    path.write_text("".join(json.dumps({**base, **r}) + "\n" for r in rows), encoding="ascii")
+    return path
+
+
+def test_rank_puts_fertile_first_then_readable_code_then_children(tmp_path):
+    path = rows_file(tmp_path, [
+        {"object": 2, "name": "Wizard", "fertile": False, "readable_verbs": 0, "children": 0},
+        {"object": 10, "name": "toy", "fertile": False, "readable_verbs": 40, "children": 0},
+        {"object": 11, "name": "Generic Bar", "fertile": True, "readable_verbs": 5, "children": 1},
+        {"object": 12, "name": "Generic Seat", "fertile": True, "readable_verbs": 5, "children": 30},
+        {"object": 13, "name": "Rindalin", "fertile": False, "readable_verbs": 50, "children": 0, "player": True},
+    ])
+    rows, _ = read_census(path)
+    assert [r["object"] for r in rank(rows)] == [12, 11, 10]
+    assert [r["object"] for r in rank(rows, fertile_only=True)] == [12, 11]
+    assert [r["object"] for r in rank(rows, include_players=True)] == [12, 11, 13, 10]
+
+    result = CliRunner().invoke(moodb, ["remote", "rank", str(path), "--name", "seat"])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("#12      f verbs   5/5   kids    30  Generic Seat  (owner #2 Wizard, parent #1)")
