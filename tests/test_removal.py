@@ -141,3 +141,13 @@ def test_removal_cli_reports_players_and_verb_owners():
     assert lines[0] == "remove 1 objects: 1 chosen, 0 descendants"
     assert lines[1] == 'players removed: #2 "Wizard"'
     assert any(line.split() == ["1010", "verb.owner"] for line in lines)
+
+
+def test_removal_cli_field_lists_only_that_fields_slots():
+    def listed(*extra):
+        result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(TOASTCORE), "removal", "#2", *extra])
+        assert result.exit_code == 0, result.output
+        return [line.split()[0] for line in result.output.splitlines() if " -> " in line]
+
+    assert {"verb.owner", "owner"} <= set(listed("--limit", "0"))  # 0 = all
+    assert set(listed("--field", "owner")) == {"owner"}

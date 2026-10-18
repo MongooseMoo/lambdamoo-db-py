@@ -432,10 +432,12 @@ def _chosen(db, refs, owned_by, names_rx) -> tuple[set[int], dict[str, set[int]]
 @click.option("--with-contents", is_flag=True, help="Also remove everything located in a removed object, except players.")
 @click.option("--name", "names_rx", multiple=True, metavar="REGEX",
               help="Also remove every object whose name matches (case-insensitive, repeatable).")
-@click.option("--limit", default=40, show_default=True, help="Inbound references to list.")
+@click.option("--limit", default=40, show_default=True, help="Inbound references to list (0 = all).")
+@click.option("--field", "fields", multiple=True,
+              help="List only the inbound references in this field, as the counts name it (repeatable).")
 @click.pass_context
 def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...], with_contents: bool,
-            names_rx: tuple[str, ...], limit: int) -> None:
+            names_rx: tuple[str, ...], limit: int | None, fields: tuple[str, ...]) -> None:
     """What removing objects would leave pointing at nothing.
 
     The set is closed over descendants (and contents, with --with-contents). Every slot outside the set that names
@@ -453,11 +455,12 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
     if not chosen:
         raise click.UsageError("name objects to remove, or --owned-by / --name")
     p = plan(db, chosen, with_contents)
+    limit = limit or None
     click.echo(f"remove {len(p.removed)} objects: {len(p.chosen)} chosen, {len(p.descendants)} descendants"
                + (f", {len(p.contents)} contents" if with_contents else ""))
     for rx, found in by_name.items():
         click.echo(f"--name {rx}: {len(found)}: " + ", ".join(label(db, x) for x in sorted(found)[:limit])
-                   + (" ..." if len(found) > limit else ""))
+                   + (" ..." if limit and len(found) > limit else ""))
     if p.players:
         click.echo("players removed: " + ", ".join(label(db, x) for x in sorted(p.players)))
     click.echo(f"inbound references from outside: {sum(p.inbound.values())} slots")
@@ -473,7 +476,8 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
     for holder, n in by_holder.most_common(limit):
         name = db.name_of(int(holder[1:])) if holder[:1] == "#" else None
         click.echo(f"{n:>8}  {holder}" + (f" {moo_string(name)}" if name is not None else ""))
-    for (field, holder, target), n in p.inbound.most_common(limit):
+    listed = [(k, n) for k, n in p.inbound.most_common() if not fields or k[0] in fields]
+    for (field, holder, target), n in listed[:limit]:
         click.echo(f"    {field}  {holder} -> {label(db, target)}" + (f"  x{n}" if n > 1 else ""))
     click.echo("dropped by the rewrite: " + (", ".join(f"{f} {n}" for f, n in p.dropped.most_common()) or "nothing"))
     click.echo(f"staying objects located inside the set: {len(p.stranded)}")
