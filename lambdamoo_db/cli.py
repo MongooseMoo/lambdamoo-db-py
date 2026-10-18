@@ -423,14 +423,16 @@ def census(ctx: click.Context, old: str | None, field: str, name_pattern: str | 
         click.echo(f"{n:>7} {b:>12}  #{key} {kind}{db.name_of(key) or ''}  e.g. {', '.join(examples)}")
 
 
-SET_OPTIONS = ("--owned-by", "--name", "--empty")
-SET_FLAGS = ("--with-contents", "--keep-numbers")
+SET_OPTIONS = ("--owned-by", "--name", "--empty", "--sweep-skip")
+SET_FLAGS = ("--with-contents", "--keep-numbers", "--sweep")
 
 
 def _read_set(path: str | None) -> dict[str, list]:
     """A removal set kept in a file, one entry per line: a REF, `--owned-by REF`, `--name REGEX` (the rest
-    of the line, spaces included), `--empty REF.NAME`, `--with-contents` or `--keep-numbers`. Blank lines
-    and lines starting with `;` are skipped."""
+    of the line, spaces included), `--empty REF.NAME`, `--with-contents`, `--keep-numbers`, `--sweep`
+    (also remove every object nothing live reaches once the rest is gone; see `unreachable`) or
+    `--sweep-skip PROP` (a bookkeeping property that keeps nothing alive for the sweep). Blank lines and
+    lines starting with `;` are skipped."""
     found: dict[str, list] = {"refs": [], **{k: [] for k in SET_OPTIONS + SET_FLAGS}}
     if path is None:
         return found
@@ -448,6 +450,16 @@ def _read_set(path: str | None) -> dict[str, list]:
         else:
             raise click.UsageError(f"{path}:{n}: not a set entry: {line!r}")
     return found
+
+
+def _swept(db, chosen: set[int], with_contents: bool, kept: dict[str, list]) -> set[int]:
+    """With a `--sweep` line: the objects nothing live reaches once ``chosen`` (closed) is gone."""
+    if not kept["--sweep"]:
+        return set()
+    from .liveness import unreachable as find
+    from .removal import plan
+
+    return find(db, kept["--sweep-skip"], plan(db, chosen, with_contents).removed)
 
 
 def _chosen(db, refs, owned_by, names_rx) -> tuple[set[int], dict[str, set[int]]]:
@@ -496,6 +508,8 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
     db = load(ctx.obj["path"])
     chosen, by_name = _chosen(db, (*refs, *kept["refs"]), (*owned_by, *kept["--owned-by"]),
                               (*names_rx, *kept["--name"]))
+    swept = _swept(db, chosen, with_contents, kept)
+    chosen |= swept
     if not chosen:
         raise click.UsageError("name objects to remove, or --owned-by / --name")
     p = plan(db, chosen, with_contents)
@@ -505,6 +519,9 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
     for rx, found in by_name.items():
         click.echo(f"--name {rx}: {len(found)}: " + ", ".join(label(db, x) for x in sorted(found)[:limit])
                    + (" ..." if limit and len(found) > limit else ""))
+    if kept["--sweep"]:
+        click.echo(f"--sweep: {len(swept)}: " + ", ".join(label(db, x) for x in sorted(swept)[:limit])
+                   + (" ..." if limit and len(swept) > limit else ""))
     if p.players:
         click.echo("players removed: " + ", ".join(label(db, x) for x in sorted(p.players)))
     click.echo(f"inbound references from outside: {sum(p.inbound.values())} slots")
@@ -660,6 +677,8 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
     empties = (*empties, *kept["--empty"])
     db = load(ctx.obj["path"])
     chosen, _ = _chosen(db, (*refs, *kept["refs"]), (*owned_by, *kept["--owned-by"]), (*names_rx, *kept["--name"]))
+    swept = _swept(db, chosen, with_contents, kept)
+    chosen |= swept
     target = {"owner_to": owner_to, "strand_to": strand_to}
     resolved = {k: (int(v[1:]) if v.startswith("#-") else _object(db, v).id) if v else None for k, v in target.items()}
     emptied = []

@@ -58,6 +58,35 @@ def test_an_object_held_only_by_a_removed_one_becomes_unreachable():
     assert unreachable(db, gone={holder}) == {held}  # the removed holder itself is not listed
 
 
+def test_a_set_file_sweep_removes_what_the_set_strands_and_what_was_loose(tmp_path):
+    from io import StringIO
+
+    from lambdamoo_db.writer import Writer
+
+    db = load(str(TOASTCORE))
+    holder, held, loose, kept_alive = _loose(db), _loose(db), _loose(db), _loose(db)
+    keepsake, ledger = db.objects[0].properties[0], db.objects[0].properties[1]
+    keepsake.value = [ObjNum(holder)]
+    ledger.value = [ObjNum(kept_alive)]  # bookkeeping: skipped below
+    db.objects[held].location = ObjNum(holder)
+    db.objects[holder].contents.append(ObjNum(held))
+    db.total_objects = max(db.objects) + 1
+    out = StringIO()
+    Writer(db=db, output_file=out).writeDatabase()
+    path = tmp_path / "loose.db"
+    path.write_bytes(out.getvalue().encode("latin-1"))
+    kept = tmp_path / "set.txt"
+    kept.write_text(f"#{holder}\n--sweep\n--sweep-skip {ledger.propertyName}\n--keep-numbers\n", encoding="utf-8")
+    result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(path), "removal", "--set", str(kept)])
+    assert result.exit_code == 0, result.output
+    sweep = next(line for line in result.output.splitlines() if line.startswith("--sweep: "))
+    assert all(f"#{x} " in sweep for x in (held, loose, kept_alive)) and f"#{holder} " not in sweep
+    rewritten = tmp_path / "out.db"
+    result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(path), "rewrite", str(rewritten), "--set", str(kept)])
+    assert result.exit_code == 0, result.output
+    assert not {holder, held, loose, kept_alive} & set(load(str(rewritten)).objects)
+
+
 def test_a_number_spelled_in_a_string_is_reported_as_a_mention():
     from lambdamoo_db.liveness import mentions
 
