@@ -149,6 +149,14 @@ moodb remote rank lambda.jsonl --name sittable           # name contains, any ca
 moodb remote rank lambda.jsonl --owner 2 --format json
 ```
 
+```sh
+moodb remote read lambda-records --census lambda.jsonl --top 200 --fertile \
+    --host lambda.moo.mud.org --port 8888 --user Rindalin --password-file ~/.config/lambdamoo/rindalin
+moodb remote build lambda-records lambda.db       # a v17 dump every moodb command reads
+moodb --db mongoose.db match lambda.db            # which of lambda.db's objects we already have
+moodb --db mongoose.db match lambda.db '#1234' --verbs
+```
+
 `remote census` connects one character (it needs the programmer bit) and walks
 object numbers in blocks with one eval each, pausing between evals. Each valid
 object becomes one JSON line: name, owner, parent, the `r` and `f` flags,
@@ -160,6 +168,16 @@ continues after the last finished block. The password is read from a file and
 never printed. `remote rank` lists objects with readable verbs, fertile first,
 then by readable verbs, then by children; players are left out unless
 `--players` is given.
+
+`remote read` saves each named and top-ranked object whole (verbs with code,
+property values, inherited slots), plus its ancestors and `#0`, as one JSON
+file; files already there are not read again. `remote build` writes them as a
+dump: numbers not read are recycled slots, a value the character could not read
+is the string `<<moodb remote: value unreadable to the reading character>>`,
+and an object whose own or an ancestor's property names were unreadable is left
+out and listed. `match` compares verb code after removing indentation, blank
+lines and "Last modified" footers: exact matches anywhere, or same-named verbs
+sharing at least `--threshold` of their lines.
 
 ### Reading relationships sideways
 

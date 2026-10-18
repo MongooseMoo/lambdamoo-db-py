@@ -163,6 +163,39 @@ def test_built_database_reads_back_with_moodb(tmp_path):
     assert "seats" in props.output and "unreadable" in props.output and "#2" in props.output
 
 
+def test_match_sorts_verbs_into_exact_similar_and_new(tmp_path):
+    def db_of(records):
+        d = tmp_path / f"r{len(list(tmp_path.iterdir()))}"
+        d.mkdir()
+        for r in records:
+            (d / f"{r['object']}.json").write_text(json.dumps(r), encoding="ascii")
+        out = d / "x.db"
+        result = CliRunner().invoke(moodb, ["remote", "build", str(d), str(out)])
+        assert result.exit_code == 0, result.output
+        return out
+
+    def verb(i, name, code):
+        return {"index": i, "info": [2, "rxd", name], "args": ["this", "none", "this"], "lines": len(code), "code": code}
+
+    sit = ['player:tell("You sit.");', "this.seated = {@this.seated, player};", "return 1;"]
+    stand = ['player:tell("You stand.");', "this.seated = setremove(this.seated, player);", "return 1;"]
+    ours = db_of([record(0, "System", -1, []),
+                  record(4, "Our Seat", -1, [], verbs=[verb(1, "sit", ["  " + l for l in sit] + ['"Last modified Tue Oct  6 01:00:00 2026 UTC by x";']),
+                                                      verb(2, "stand", stand[:2] + ['return 0;'])])])
+    theirs = db_of([record(0, "System", -1, []),
+                    record(7, "Their Seat", -1, [], verbs=[verb(1, "sit", sit), verb(2, "stand", stand),
+                                                         verb(3, "bounce", ['player:tell("Boing.");'])])])
+
+    result = CliRunner().invoke(moodb, ["--db", str(ours), "--no-cache", "match", str(theirs), "#7", "--verbs"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "#7 Their Seat: have a different version (exact 1, similar 1, new 1)",
+        "    sit: exact  #4:sit",
+        "    stand: similar  #4:stand 50%",
+        "    bounce: new",
+    ]
+
+
 def rows_file(tmp_path, rows):
     path = tmp_path / "census.jsonl"
     base = {"owner": 2, "parent": 1, "readable": True, "player": False, "verbs": 5, "properties": 0}

@@ -1277,3 +1277,41 @@ register_mail(moodb, _db)
 from .remote_cli import register_remote
 
 register_remote(moodb)
+
+
+@moodb.command()
+@click.argument("other", type=click.Path(exists=True, dir_okay=False))
+@click.argument("refs", nargs=-1)
+@click.option("--threshold", type=click.FloatRange(0, 1), default=0.5, show_default=True,
+              help="Least share of common lines for a same-named verb to count as similar.")
+@click.option("--verbs", "show_verbs", is_flag=True, help="List every verb with where it matched.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.pass_context
+def match(ctx: click.Context, other: str, refs: tuple[str, ...], threshold: float, show_verbs: bool, fmt: str) -> None:
+    """Which objects of OTHER (all with code, or REFS) already exist in --db, judged by verb code.
+
+    A verb matches exactly when its source is the same after indentation, blank
+    lines and "Last modified" footers are removed; it is similar when a verb
+    sharing one of its names has at least THRESHOLD of its lines. Verdicts:
+    "have it" (80% exact), "have a different version" (half exact or similar),
+    "new".
+    """
+    from .inspection import all_objects
+    from .match import VerbIndex, match_objects, verdict
+    db, _ = _db(ctx)
+    other_db = load(other)
+    objs = [_object(other_db, r) for r in refs] if refs else [o for o in all_objects(other_db) if any(v.code for v in o.verbs)]
+    results = match_objects(VerbIndex(db), objs, threshold)
+    for r in results:
+        r["verdict"] = verdict(r)
+    if fmt == "json":
+        click.echo(json.dumps(results, ensure_ascii=True))
+        return
+    for r in results:
+        click.echo(f"#{r['object']} {r['name']}: {r['verdict']} "
+                   f"(exact {r['exact']}, similar {r['similar']}, new {r['new']})")
+        if show_verbs:
+            for v in r["verbs"]:
+                where = ", ".join(f"#{p[0]}:{p[2].split()[0]}" if v["match"] == "exact"
+                                  else f"#{p[1][0]}:{p[1][2].split()[0]} {p[0]:.0%}" for p in v["where"])
+                click.echo(f"    {v['verb']}: {v['match']}{'  ' + where if where else ''}")
