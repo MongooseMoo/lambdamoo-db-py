@@ -1,8 +1,10 @@
+from collections import Counter
 from pathlib import Path
 
 from click.testing import CliRunner
 
 import lambdamoo_db.cli as cli
+from lambdamoo_db.reader import load
 
 TOASTCORE = Path(__file__).parent.parent / "toastcore.db"
 
@@ -24,6 +26,23 @@ def test_census_sizes_add_up_to_the_object_records_and_programs(tmp_path):
     lines = run("--cache-dir", str(tmp_path), "--db", str(TOASTCORE), "census", "--by", "parent", "--limit", "100")
     assert sum(int(line.split()[1]) for line in lines[1:]) == 2082546
     assert sum(int(line.split()[0]) for line in lines[1:]) == 127
+
+
+def test_census_by_top_groups_each_object_under_its_outermost_location(tmp_path):
+    db = load(str(TOASTCORE))
+
+    def top(oid):
+        seen = {oid}
+        while int(db.objects[oid].location) in db.objects and int(db.objects[oid].location) not in seen:
+            oid = int(db.objects[oid].location)
+            seen.add(oid)
+        return oid
+
+    want = Counter(top(oid) for oid, o in db.objects.items() if not o.anon)
+    lines = run("--cache-dir", str(tmp_path), "--db", str(TOASTCORE), "census", "--by", "top", "--limit", "200")
+    assert lines[0].endswith(f"in {len(want)} groups by top")
+    assert {int(line.split()[2][1:]): int(line.split()[0]) for line in lines[1:]} == want
+    assert any(n > 1 for n in want.values())  # something is inside something
 
 
 def test_census_since_itself_is_empty(tmp_path):

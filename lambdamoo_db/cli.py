@@ -373,8 +373,9 @@ def _indexed(ctx: click.Context, path: str) -> LazyDatabase:
 @moodb.command()
 @click.option("--since", "old", type=click.Path(exists=True, dir_okay=False),
               help="Only objects this older dump does not have (by number).")
-@click.option("--by", "field", type=click.Choice(["owner", "parent", "location", "object"]), default="owner",
-              show_default=True, help="`object` lists single objects, largest first.")
+@click.option("--by", "field", type=click.Choice(["owner", "parent", "location", "top", "object"]), default="owner",
+              show_default=True, help="`top` is the outermost location (what a ship or area holds, however deep); "
+                                      "`object` lists single objects, largest first.")
 @click.option("--name", "name_pattern", help="Only objects whose name matches this regex (case-insensitive).")
 @click.option("--limit", default=40, show_default=True, help="Groups to show.")
 @click.pass_context
@@ -391,13 +392,23 @@ def census(ctx: click.Context, old: str | None, field: str, name_pattern: str | 
     skip = set(_indexed(ctx, old).index.records) if old else set()
     named = re.compile(name_pattern, re.I) if name_pattern else None
     groups: dict[int, list] = {}
-    for o in db.object_heads():
+    heads = list(db.object_heads())
+    where = {o.id: int(o.location) for o in heads}
+
+    def top(oid: int) -> int:
+        seen = {oid}
+        while where.get(oid, -1) in where and where[oid] not in seen:
+            oid = where[oid]
+            seen.add(oid)
+        return oid
+
+    for o in heads:
         if o.id in skip or (named and not named.search(o.name)):
             continue
         start, end, anon = index.records[o.id]
         size = end - start + sum(e - s for s, e in index.programs.get(o.id, ()))
         key = {"owner": lambda: int(o.owner), "parent": lambda: int(o.parents[0]) if o.parents else -1,
-               "location": lambda: int(o.location), "object": lambda: o.id}[field]()
+               "location": lambda: int(o.location), "top": lambda: top(o.id), "object": lambda: o.id}[field]()
         row = groups.setdefault(key, [0, 0, []])
         row[0] += 1
         row[1] += size
