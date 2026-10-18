@@ -59,16 +59,22 @@ def register_remote(moodb):
                   help="Census file; every object's ancestors are read too, as it records them.")
     @click.option("--top", type=click.IntRange(min=0), default=0, help="Also read the first N of `remote rank`.")
     @click.option("--fertile", is_flag=True, help="With --top: rank only fertile objects.")
+    @click.option("--exclude-under", type=int, multiple=True, metavar="N",
+                  help="With --top: leave out object N and everything below it (repeatable).")
+    @click.option("--under", type=int, multiple=True, metavar="N",
+                  help="With --top: only object N and everything below it (repeatable).")
     @click.option("--host", required=True)
     @click.option("--port", type=int, required=True)
     @click.option("--user", required=True)
     @click.option("--password-file", type=click.Path(exists=True, dir_okay=False), required=True)
     @click.option("--pause", type=float, default=1.0, show_default=True, help="Seconds between objects.")
-    def read_cmd(records_dir, objects, census_file, top, fertile, host, port, user, password_file, pause):
+    def read_cmd(records_dir, objects, census_file, top, fertile, exclude_under, under, host, port, user,
+                 password_file, pause):
         """Read OBJECTS (and the top ranked) whole into RECORDS_DIR, one JSON file each; existing files are kept."""
         rows, _ = read_census(census_file)
+        ranked = rank(rows, fertile_only=fertile, exclude_under=exclude_under, under=under)[:top]
         # #0 always: moodb resolves $names through it
-        wanted = [0, *objects, *(r["object"] for r in rank(rows, fertile_only=fertile)[:top])]
+        wanted = [0, *objects, *(r["object"] for r in ranked)]
         order = []
         for n in wanted:
             while n >= 0 and n not in order:
@@ -122,13 +128,18 @@ def register_remote(moodb):
     @click.option("--min-verbs", type=click.IntRange(min=0), default=1, show_default=True,
                   help="Least number of readable verbs.")
     @click.option("--owner", "owners", type=int, multiple=True, help="Only objects owned by this object number.")
+    @click.option("--exclude-under", type=int, multiple=True, metavar="N",
+                  help="Leave out object N and everything below it (repeatable), e.g. 6 for player classes.")
+    @click.option("--under", type=int, multiple=True, metavar="N",
+                  help="Only object N and everything below it (repeatable).")
     @click.option("--name", "name_part", help="Only objects whose name contains this text (any case).")
     @click.option("--top", type=click.IntRange(min=1), default=50, show_default=True)
     @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
-    def rank_cmd(census_file, fertile, players, min_verbs, owners, name_part, top, fmt):
+    def rank_cmd(census_file, fertile, players, min_verbs, owners, exclude_under, under, name_part, top, fmt):
         """Objects worth reading, best first: fertile, then most readable verbs, then most children."""
         rows, _ = read_census(census_file)
-        ranked = rank(rows, fertile_only=fertile, include_players=players, min_verbs=min_verbs)
+        ranked = rank(rows, fertile_only=fertile, include_players=players, min_verbs=min_verbs,
+                      exclude_under=exclude_under, under=under)
         if owners:
             ranked = [r for r in ranked if r["owner"] in owners]
         if name_part:

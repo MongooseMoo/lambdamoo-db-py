@@ -215,6 +215,9 @@ def test_rank_puts_fertile_first_then_readable_code_then_children(tmp_path):
     assert [r["object"] for r in rank(rows)] == [12, 11, 10]
     assert [r["object"] for r in rank(rows, fertile_only=True)] == [12, 11]
     assert [r["object"] for r in rank(rows, include_players=True)] == [12, 11, 13, 10]
+    assert [r["object"] for r in rank(rows, exclude_under=[1])] == []
+    assert [r["object"] for r in rank(rows, exclude_under=[12])] == [11, 10]
+    assert [r["object"] for r in rank(rows, under=[12])] == [12]
 
     result = CliRunner().invoke(moodb, ["remote", "rank", str(path), "--name", "seat"])
     assert result.exit_code == 0, result.output

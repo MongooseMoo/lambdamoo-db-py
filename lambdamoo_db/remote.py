@@ -422,10 +422,24 @@ def _chain(records, parent):
         parent = records[parent]["parent"]
 
 
-def rank(rows, fertile_only=False, include_players=False, min_verbs=1):
+def descends_from(rows, n, roots):
+    """Whether census object N is one of ROOTS or below one, by the parents the census recorded."""
+    seen = set()
+    while n >= 0 and n not in seen:
+        if n in roots:
+            return True
+        seen.add(n)
+        n = rows[n]["parent"] if n in rows else -1
+    return False
+
+
+def rank(rows, fertile_only=False, include_players=False, min_verbs=1, exclude_under=(), under=()):
     """Objects worth reading, best first: fertile, then most readable verbs, then most children."""
+    excluded, wanted = set(exclude_under), set(under)
     chosen = [r for r in rows.values()
               if r["readable_verbs"] >= min_verbs
               and (include_players or not r["player"])
-              and (r["fertile"] or not fertile_only)]
+              and (r["fertile"] or not fertile_only)
+              and not (excluded and descends_from(rows, r["object"], excluded))
+              and (not wanted or descends_from(rows, r["object"], wanted))]
     return sorted(chosen, key=lambda r: (not r["fertile"], -r["readable_verbs"], -r["children"], r["object"]))
