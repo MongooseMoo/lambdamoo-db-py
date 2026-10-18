@@ -156,24 +156,34 @@ def _db(ctx: click.Context):
 
 @moodb.command()
 @click.argument("query", nargs=-1)
+@click.option("-k", "--keep-going", is_flag=True, help="Report a failed query as `error: …` and go on; exit 1 at the end.")
 @click.pass_context
-def batch(ctx: click.Context, query: tuple[str, ...]) -> None:
+def batch(ctx: click.Context, query: tuple[str, ...], keep_going: bool) -> None:
     """Answer several queries in one run: `batch 'obj 842' 'code 842:0 842:1' 'prop 842.todos'`.
 
     Each QUERY is one moodb command with its arguments, quoted as in a POSIX
     shell. With no QUERY, queries are read from standard input, one per line.
     Each answer follows a `=== QUERY` line. The run stops at the first query
-    that fails.
+    that fails, unless --keep-going.
     """
     queries = query or tuple(line.strip() for line in iter(sys.stdin.readline, "") if line.strip())
+    failed = 0
     for q in queries:
         name, *arguments = shlex.split(q)
         command = moodb.get_command(ctx, name)
         if command is None:
             raise click.UsageError(f"no such command {name!r} in {q!r}")
         click.echo(f"=== {q}")
-        with command.make_context(name, arguments, parent=ctx) as sub:
-            command.invoke(sub)
+        try:
+            with command.make_context(name, arguments, parent=ctx) as sub:
+                command.invoke(sub)
+        except click.ClickException as e:
+            if not keep_going:
+                raise
+            click.echo(f"error: {e.format_message()}")
+            failed += 1
+    if failed:
+        ctx.exit(1)
 
 
 def _object(db, ref: str):
