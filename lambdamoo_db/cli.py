@@ -9,6 +9,7 @@ from itertools import groupby
 from pathlib import Path
 
 import click
+from .database import ObjNum
 from .inspection import (
     BUILTIN_PROPS,
     LookupFailed,
@@ -523,15 +524,21 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
     click.echo(f"wrote {out} and {out}.map.json")
 
 
-def _owner_kind(db: LazyDatabase, oid: int, players: set[int]) -> str:
-    """What an owner is: a player, an object that owns itself, another object, nothing (#-1) or missing."""
+def _object_kind(db: LazyDatabase, oid: int, players: set[int]) -> str:
+    """What a number names: nothing (negative), a missing object, a player or another object."""
     if oid < 0:
         return "nothing"
     if oid not in db.index.records:
         return "missing"
-    if oid in players:
-        return "player"
-    return "self-owned" if int(db.read_head(oid).owner) == oid else "object"
+    return "player" if oid in players else "object"
+
+
+def _owner_kind(db: LazyDatabase, oid: int, players: set[int]) -> str:
+    """What an owner is: a player, an object that owns itself, another object, nothing (#-1) or missing."""
+    kind = _object_kind(db, oid, players)
+    if kind == "object" and int(db.read_head(oid).owner) == oid:
+        return "self-owned"
+    return kind
 
 
 @moodb.command()
@@ -779,6 +786,61 @@ def prop(ctx: click.Context, spec: tuple[str, ...], full: bool) -> None:
             notes.append(f"clear, value from #{hit.value_from.id}")
         where = f" ({'; '.join(notes)})" if notes else ""
         click.echo(f"#{o.id}.{hit.name}{where} = {format_value(hit.value, None if full else 2000)}")
+
+
+@moodb.command()
+@click.argument("spec")
+@click.pass_context
+def keys(ctx: click.Context, spec: str) -> None:
+    """Group a map property's keys, or a list property's elements, by what they name.
+
+    Object numbers are a player, another object, a missing object (recycled or past
+    the end) or nothing (negative); anything else is grouped by its type. Bytes are
+    the entries' size in the dump (key and value for a map).
+    """
+    from io import StringIO
+
+    from .writer import Writer
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = _indexed(ctx, ctx.obj["path"])
+    try:
+        ref, rest = split_ref(spec)
+        if not rest.startswith(".") or len(rest) < 2:
+            raise LookupFailed(f"expected REF.PROP, got {spec!r}")
+        o = resolve_object(db, ref)
+        hit = lookup_property(db, o, rest[1:])
+    except LookupFailed as e:
+        raise click.ClickException(str(e))
+    value = hit.value
+    if isinstance(value, dict):
+        entries, what = list(value.items()), f"map of {len(value)} keys"
+    elif isinstance(value, list):
+        entries, what = [(e, None) for e in value], f"list of {len(value)} elements"
+    else:
+        raise click.ClickException(f"#{o.id}.{hit.name} is neither a map nor a list")
+
+    def size(*values) -> int:
+        out = StringIO()
+        writer = Writer(db=db, output_file=out)
+        for v in values:
+            if v is not None:
+                writer.writeValue(v)
+        return len(out.getvalue())
+
+    players = {int(p) for p in db.players}
+    groups: dict[str, list] = {}
+    for key, entry in entries:
+        kind = _object_kind(db, int(key), players) if isinstance(key, ObjNum) else type(key).__name__.upper()
+        row = groups.setdefault(kind, [0, 0, []])
+        row[0] += 1
+        row[1] += size(key, entry)
+        if len(row[2]) < 3:
+            row[2].append(format_value(key, 40))
+    click.echo(f"#{o.id}.{hit.name}: {what}")
+    for kind, (n, nbytes, examples) in sorted(groups.items(), key=lambda kv: (-kv[1][0], kv[0])):
+        click.echo(f"{kind:<8} {n:>8} {nbytes:>12}  e.g. {', '.join(examples)}")
 
 
 @moodb.command()
