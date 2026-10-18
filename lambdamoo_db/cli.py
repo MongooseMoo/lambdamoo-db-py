@@ -839,9 +839,12 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
 @click.option("--prop", "mode", flag_value="prop", help="Find objects defining a property named TEXT (case-insensitive).")
 @click.option("--glob", "glob", is_flag=True,
               help="With --verb or --prop: TEXT is a shell pattern (`event_*`) matched against each verb name or the property name.")
+@click.option("--no-catchall", is_flag=True,
+              help="With --verb: ignore matches made only through a catch-all name, one with no letter or digit "
+                   "before its `*` (`*`, `@*`).")
 @click.option("-c", "--count", is_flag=True, help="Print only the number of hits for each TEXT.")
 @click.pass_context
-def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, count: bool) -> None:
+def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, no_catchall: bool, count: bool) -> None:
     """Find objects whose name or $name contains TEXT (case-insensitive).
 
     With --verb or --prop, find where a verb or property is defined instead.
@@ -849,15 +852,24 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
     """
     if glob and mode is None:
         raise click.UsageError("--glob needs --verb or --prop")
+    if no_catchall and mode != "verb":
+        raise click.UsageError("--no-catchall needs --verb")
     db, names = _db(ctx)
     hits: dict[str, list[str]] = {t: [] for t in text}
+
+    def calls(name, t):
+        if not no_catchall:
+            return answers_call(name, t)
+        return any(answers_call(alias, t) for alias in name.split()
+                   if not ("*" in alias and not re.search(r"[A-Za-z0-9]", alias.split("*")[0])))
+
     if mode == "verb":
         for o in object_heads(db):
             for idx, v in enumerate(o.verbs):
                 verb_names = v.name.lower().split()
                 verb_names += [n[1:] for n in verb_names if n.startswith(":")]  # a waif class verb, as it is called
                 for t in hits:
-                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else answers_call(v.name, t):
+                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else calls(v.name, t):
                         hits[t].append(f"{label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
     elif mode == "prop":
         for num, defined in defined_property_names(db):

@@ -188,6 +188,29 @@ def test_two_equal_verbs_on_one_object_write_as_two_programs(tmp_path):
     assert "return 1;" in code.output
 
 
+def test_find_verb_no_catchall_ignores_star_only_names(tmp_path):
+    def verb(i, name):
+        return {"index": i, "info": [2, "rxd", name], "args": ["any", "any", "any"], "lines": 1, "code": ["return;"]}
+
+    records_dir = tmp_path / "records"
+    records_dir.mkdir()
+    for r in (record(0, "System", -1, []),
+              record(4, "Huh", -1, [], verbs=[verb(1, "*"), verb(2, "@*")]),
+              record(5, "Paster", -1, [], verbs=[verb(1, "@p*aste @*")])):
+        (records_dir / f"{r['object']}.json").write_text(json.dumps(r), encoding="ascii")
+    out = tmp_path / "x.db"
+    assert CliRunner().invoke(moodb, ["remote", "build", str(records_dir), str(out)]).exit_code == 0
+
+    def found(*args):
+        result = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "find", "--verb", *args])
+        assert result.exit_code == 0, result.output
+        return [line.split()[0] for line in result.output.splitlines()]
+
+    assert found("@paste") == ["#4", "#4", "#5"]
+    assert found("@paste", "--no-catchall") == ["#5"]
+    assert found("@pals", "--no-catchall") == []
+
+
 def test_match_sorts_verbs_into_exact_similar_and_new(tmp_path):
     def db_of(records):
         d = tmp_path / f"r{len(list(tmp_path.iterdir()))}"
