@@ -13,7 +13,8 @@ from dataclasses import dataclass
 
 from .database import CLEAR, MooDatabase, MooError, MooObject, ObjNum, Property, Verb
 from .enums import ObjectFlags
-from .inspection import ERROR_NAMES
+from .inspection import (ARG_NAMES, ERROR_NAMES, PREP_ANY, PREP_NONE, PREPOSITIONS, VERB_DEBUG, VERB_EXEC,
+                         VERB_READ, VERB_WRITE)
 
 MARK = "@@moodb"
 
@@ -321,19 +322,13 @@ def _encode(value):
 
 UNREADABLE = "<<moodb remote: value unreadable to the reading character>>"
 
-PREPS = ["with/using", "at/to", "in front of", "in/inside/into", "on top of/on/onto/upon",
-         "out of/from inside/from", "over", "through", "under/underneath/beneath", "behind", "beside",
-         "for/about", "is", "as", "off/off of"]
-ARG_SPECS = {"none": 0, "any": 1, "this": 2}
-
-
 def _prep_index(prep):
     if prep == "none":
-        return -2
+        return PREP_NONE
     if prep == "any":
-        return -1
+        return PREP_ANY
     words = set(prep.split("/"))
-    for index, spelling in enumerate(PREPS):
+    for index, spelling in enumerate(PREPOSITIONS):
         if words & set(spelling.split("/")):
             return index
     raise ValueError(f"unknown preposition {prep!r}")
@@ -390,10 +385,10 @@ def build_database(records):
         for verb in record["verbs"]:
             info, args = verb["info"], verb["args"]
             name = info[2] if info else (names[verb["index"] - 1] if names else f"<<unreadable verb {verb['index']}>>")
-            perms = _perm_bits(info[1], {"r": 1, "w": 2, "x": 4, "d": 8}) if info else 0
-            preps = -2
+            perms = _perm_bits(info[1], {"r": VERB_READ, "w": VERB_WRITE, "x": VERB_EXEC, "d": VERB_DEBUG}) if info else 0
+            preps = PREP_NONE
             if args:
-                perms |= ARG_SPECS[args[0]] << 4 | ARG_SPECS[args[2]] << 6
+                perms |= ARG_NAMES.index(args[0]) << 4 | ARG_NAMES.index(args[2]) << 6
                 preps = _prep_index(args[1])
             v = Verb(name, info[0] if info else -1, perms, preps, n)
             v.code = verb["code"]
