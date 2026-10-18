@@ -51,7 +51,10 @@ class Report:
 
 
 def rewrite(db: MooDatabase, chosen: Iterable[int], owner_to: int | None = None,
-            strand_to: int | None = None, with_contents: bool = False) -> Report:
+            strand_to: int | None = None, with_contents: bool = False, keep_numbers: bool = False) -> Report:
+    """With ``keep_numbers`` nothing is renumbered: removed objects become recycled slots, survivors keep
+    their numbers (so numbers spelled in strings and in outside URLs stay right), only references to the
+    removed objects become dead numbers, and references to objects already missing stay as they are."""
     p = plan(db, chosen, with_contents)
     removed = p.removed
     base = _dead_base(db)
@@ -62,8 +65,13 @@ def rewrite(db: MooDatabase, chosen: Iterable[int], owner_to: int | None = None,
 
     permanent = sorted(oid for oid, o in db.objects.items() if not o.anon)
     anons = sorted(oid for oid, o in db.objects.items() if o.anon)
-    new_perm = {old: new for new, old in enumerate(permanent)}
-    new_anon = {old: len(permanent) + k for k, old in enumerate(anons)}
+    if keep_numbers:
+        new_perm = {old: old for old in permanent}
+        total = db.total_objects
+    else:
+        new_perm = {old: new for new, old in enumerate(permanent)}
+        total = len(permanent)
+    new_anon = {old: total + k for k, old in enumerate(anons)}
     dropped = _drop_dead_entries(db, set(new_perm))
 
     dead_slots: Counter = Counter()
@@ -77,6 +85,8 @@ def rewrite(db: MooDatabase, chosen: Iterable[int], owner_to: int | None = None,
             return number
         if number in new_perm:
             return new_perm[number]
+        if keep_numbers and number not in removed:
+            return number  # already missing before this rewrite: left as the live game has it
         dead_slots[_field(where)] += 1
         return dead(number, base)
 
@@ -87,8 +97,8 @@ def rewrite(db: MooDatabase, chosen: Iterable[int], owner_to: int | None = None,
         o.id = new_perm.get(old, new_anon.get(old))
         objects[o.id] = o
     db.objects = objects
-    db.total_objects = len(permanent)
-    db.recycled_objects = set()
+    db.total_objects = total
+    db.recycled_objects = (db.recycled_objects | removed) if keep_numbers else set()
     return Report(p, base, {**new_perm, **new_anon}, dead_slots, dropped, reassigned, tasks_dropped)
 
 

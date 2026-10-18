@@ -424,13 +424,14 @@ def census(ctx: click.Context, old: str | None, field: str, name_pattern: str | 
 
 
 SET_OPTIONS = ("--owned-by", "--name", "--empty")
+SET_FLAGS = ("--with-contents", "--keep-numbers")
 
 
 def _read_set(path: str | None) -> dict[str, list]:
     """A removal set kept in a file, one entry per line: a REF, `--owned-by REF`, `--name REGEX` (the rest
-    of the line, spaces included), `--empty REF.NAME` or `--with-contents`. Blank lines and lines starting
-    with `;` are skipped."""
-    found: dict[str, list] = {"refs": [], "--owned-by": [], "--name": [], "--empty": [], "--with-contents": []}
+    of the line, spaces included), `--empty REF.NAME`, `--with-contents` or `--keep-numbers`. Blank lines
+    and lines starting with `;` are skipped."""
+    found: dict[str, list] = {"refs": [], **{k: [] for k in SET_OPTIONS + SET_FLAGS}}
     if path is None:
         return found
     for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
@@ -438,7 +439,7 @@ def _read_set(path: str | None) -> dict[str, list]:
         if not line or line.startswith(";"):
             continue
         word, _, rest = line.partition(" ")
-        if word == "--with-contents" and not rest:
+        if word in SET_FLAGS and not rest:
             found[word].append(True)
         elif word in SET_OPTIONS and rest.strip():
             found[word].append(rest.strip())
@@ -529,6 +530,90 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
 
 
 @moodb.command()
+@click.option("--limit", default=40, show_default=True, help="Places to list (0 = all).")
+@click.pass_context
+def mentions(ctx: click.Context, limit: int) -> None:
+    """Where existing objects' numbers are spelled `#N` inside strings, by property or verb.
+
+    A renumbering rewrites object values and code literals, not text: these strings keep the old numbers.
+    Code that builds keys with tostr(obj) or reads them back with toobj() then meets the wrong object.
+    """
+    from .liveness import mentions as find
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = load(ctx.obj["path"])
+    found = find(db, {oid for oid, o in db.objects.items() if not o.anon})
+    by_place: Counter = Counter()
+    for where in found.values():
+        for w in where:
+            by_place[w] += 1
+    click.echo(f"{len(found)} objects are spelled #N in strings, in {len(by_place)} places")
+    for w, n in by_place.most_common(limit or None):
+        click.echo(f"{n:>8}  {w}")
+
+
+@moodb.command()
+@click.option("--skip", multiple=True, metavar="NAME",
+              help="A property whose values keep nothing alive (bookkeeping); repeatable, case-insensitive.")
+@click.option("--limit", default=40, show_default=True, help="Groups to list (0 = all).")
+@click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
+              help="Treat this removal set (as `removal --set` reads it) as already gone.")
+@click.pass_context
+def unreachable(ctx: click.Context, skip: tuple[str, ...], limit: int, set_file: str | None) -> None:
+    """Objects nothing live reaches, grouped under the outermost unreachable object that holds them.
+
+    Roots: #0 (every $name), players, tasks and other slots no object holds. Followed: every number a
+    reached object holds in properties, verb code, location, contents, parents and waifs. Not followed:
+    children, owners, owned lists, last_move, lost_souls and --skip properties.
+    """
+    from .liveness import mentions
+    from .liveness import unreachable as find
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = load(ctx.obj["path"])
+    removed: set[int] = set()
+    if set_file:
+        from .removal import plan
+
+        kept = _read_set(set_file)
+        chosen, _ = _chosen(db, kept["refs"], kept["--owned-by"], kept["--name"])
+        removed = plan(db, chosen, bool(kept["--with-contents"])).removed
+    gone = find(db, skip, removed)
+    players = {int(p) for p in db.players}
+    owners = Counter(int(db.objects[oid].owner) for oid in gone)
+    spelled = mentions(db, gone, ignore=gone | removed)
+
+    def top(oid: int) -> int:
+        seen = {oid}
+        while int(db.objects[oid].location) in gone and int(db.objects[oid].location) not in seen:
+            oid = int(db.objects[oid].location)
+            seen.add(oid)
+        return oid
+
+    groups: dict[int, list[int]] = {}
+    for oid in sorted(gone):
+        groups.setdefault(top(oid), []).append(oid)
+    click.echo(f"unreachable: {len(gone)} objects in {len(groups)} groups"
+               + (f" beside the {len(removed)} the set removes" if set_file else "")
+               + (f" (skipping {', '.join(skip)})" if skip else ""))
+    for root, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:limit or None]:
+        o = db.objects[root]
+        click.echo(f"{len(members):>7}  {label(db, root)} owner #{int(o.owner)} parent "
+                   f"#{int(o.parents[0]) if o.parents else -1}"
+                   + (f"  e.g. {', '.join(label(db, m) for m in members[1:4])}" if len(members) > 1 else ""))
+    click.echo(f"by owner ({len(owners)}):")
+    for owner, n in owners.most_common(limit or None):
+        kind = ("player" if owner in players else "nothing" if owner == -1
+                else "object" if owner in db.objects else "missing")
+        click.echo(f"{n:>7}  {label(db, owner) if owner in db.objects else f'#{owner}'} [{kind}]")
+    click.echo(f"spelled as #N in a string elsewhere (the sweep cannot follow these): {len(spelled)}")
+    for oid, where in sorted(spelled.items())[:limit or None]:
+        click.echo(f"    {label(db, oid)}  in {', '.join(sorted(where)[:4])}" + (" ..." if len(where) > 4 else ""))
+
+
+@moodb.command()
 @click.argument("out", type=click.Path(dir_okay=False))
 @click.argument("refs", nargs=-1)
 @click.option("--owned-by", multiple=True, help="Also remove this object and everything it owns (repeatable).")
@@ -540,21 +625,26 @@ def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...]
 @click.option("--empty", "empties", multiple=True, metavar="REF.NAME",
               help="Empty this property's value (same type) and clear descendants' own values; repeatable.")
 @click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
-              help="Read more of the set from FILE: one REF, --owned-by REF, --name REGEX, --empty REF.NAME or "
-                   "--with-contents per line; ; starts a comment.")
+              help="Read more of the set from FILE: one REF, --owned-by REF, --name REGEX, --empty REF.NAME, "
+                   "--with-contents or --keep-numbers per line; ; starts a comment.")
+@click.option("--keep-numbers", is_flag=True,
+              help="Renumber nothing: removed objects become recycled slots and survivors keep their numbers.")
 @click.pass_context
 def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple[str, ...],
             owner_to: str | None, strand_to: str | None, with_contents: bool, names_rx: tuple[str, ...],
-            empties: tuple[str, ...], set_file: str | None) -> None:
-    """Write OUT: the dump without the named objects, numbered densely.
+            empties: tuple[str, ...], set_file: str | None, keep_numbers: bool) -> None:
+    """Write OUT: the dump without the named objects, numbered densely unless --keep-numbers.
 
     Removes the objects (and their descendants), numbers the rest #0.. in their
     old order with no recycled slots, and rewrites every reference: values,
     the object table, verb code literals, tasks. A reference to a removed or
-    missing object becomes a distinct negative number (base - old). Writes
-    OUT.map.json (old -> new) and prints what changed. Refuses while anything
-    surviving is owned by, or located in, a removed object, unless --owner-to
-    or --strand-to says where it goes.
+    missing object becomes a distinct negative number (base - old). Numbers
+    spelled inside strings are NOT rewritten, so dense numbering breaks code
+    that keys data by tostr(obj) and outside URLs that carry object numbers;
+    --keep-numbers avoids that (only references to removed objects change).
+    Writes OUT.map.json (old -> new) and prints what changed. Refuses while
+    anything surviving is owned by, or located in, a removed object, unless
+    --owner-to or --strand-to says where it goes.
     """
     from .rewrite import RewriteRefused, empty_property
     from .rewrite import rewrite as rewrite_db
@@ -566,6 +656,7 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
         raise click.UsageError("OUT must not be the dump being read")
     kept = _read_set(set_file)
     with_contents = with_contents or bool(kept["--with-contents"])
+    keep_numbers = keep_numbers or bool(kept["--keep-numbers"])
     empties = (*empties, *kept["--empty"])
     db = load(ctx.obj["path"])
     chosen, _ = _chosen(db, (*refs, *kept["refs"]), (*owned_by, *kept["--owned-by"]), (*names_rx, *kept["--name"]))
@@ -578,7 +669,7 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
             if not ref or not name:
                 raise click.UsageError(f"--empty wants REF.NAME, got {spec!r}")
             emptied.append(f"{spec} {empty_property(db, _object(db, ref).id, name)}")
-        report = rewrite_db(db, chosen, **resolved, with_contents=with_contents)
+        report = rewrite_db(db, chosen, **resolved, with_contents=with_contents, keep_numbers=keep_numbers)
     except RewriteRefused as e:
         raise click.ClickException(str(e)) from e
     with open(out, "w", encoding="latin-1", newline="") as f:
@@ -587,7 +678,9 @@ def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple
     p = report.plan
     click.echo(f"removed {len(p.removed)} objects ({len(p.chosen)} chosen, {len(p.descendants)} descendants, "
                f"{len(p.contents)} contents); "
-               f"{db.total_objects} permanent objects now, highest #{db.total_objects - 1}")
+               + (f"numbers kept: {sum(1 for o in db.objects.values() if not o.anon)} objects in "
+                  f"#0..#{db.total_objects - 1}, {len(db.recycled_objects)} recycled slots" if keep_numbers else
+                  f"{db.total_objects} permanent objects now, highest #{db.total_objects - 1}"))
     click.echo(f"dead numbers: base {report.base}; {sum(report.dead_slots.values())} slots")
     for field, n in report.dead_slots.most_common():
         click.echo(f"{n:>10}  {field}")

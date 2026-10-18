@@ -72,6 +72,52 @@ def test_removal_compacts_and_moves_every_reference(tmp_path):
         assert n >= -3 or n <= DEAD_BASE, where
 
 
+def test_keep_numbers_leaves_survivors_and_strings_alone_and_recycles_the_removed(tmp_path):
+    db = load(str(TOASTCORE))
+    victim = leaf(db)
+    above = min(oid for oid in db.objects if oid > victim and not db.objects[oid].anon)
+    missing = max(db.objects) + 50  # already gone before the rewrite
+    db.objects[0].properties.append(Property("pointers", [ObjNum(victim), ObjNum(above), ObjNum(missing),
+                                                          f"#{above}:fall"], 2, 0))
+    db.objects[0].verbs[0].code = list(db.objects[0].verbs[0].code) + [f"return {{#{victim}, #{above}}};"]
+    total, recycled = db.total_objects, set(db.recycled_objects)
+    report = rewrite(db, [victim], keep_numbers=True)
+    out = reread(db, tmp_path)
+    assert out.total_objects == total and out.recycled_objects == recycled | {victim}
+    assert victim not in out.objects and all(old == new for old, new in report.renumbered.items())
+    assert out.objects[0].properties[-1].value == [ObjNum(dead(victim)), ObjNum(above), ObjNum(missing),
+                                                   f"#{above}:fall"]
+    assert out.objects[0].verbs[0].code[-1] == f"return {{#{dead(victim)}, #{above}}};"
+    assert report.dead_slots[".pointers"] == 1 and report.dead_slots["verb.code"] >= 1  # missing one not counted
+
+
+def test_keep_numbers_twice_gives_the_same_bytes(tmp_path):
+    db = load(str(TOASTCORE))
+    rewrite(db, [leaf(db)], keep_numbers=True)
+    once = reread(db, tmp_path)
+    before = written(once)
+    report = rewrite(once, [], keep_numbers=True)
+    assert written(once) == before and not report.dead_slots
+
+
+def test_rewrite_cli_keeps_numbers_when_the_set_file_says_so(tmp_path):
+    from click.testing import CliRunner
+
+    import lambdamoo_db.cli as cli
+
+    db = load(str(TOASTCORE))
+    victim = leaf(db)
+    kept = tmp_path / "set.txt"
+    kept.write_text(f"--keep-numbers\n#{victim}\n", encoding="utf-8")
+    out = tmp_path / "out.db"
+    result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(TOASTCORE), "rewrite", str(out), "--set", str(kept)])
+    assert result.exit_code == 0, result.output
+    assert "numbers kept:" in result.output.splitlines()[0]
+    after = load(str(out))
+    assert after.total_objects == db.total_objects and victim in after.recycled_objects
+    assert set(after.objects) == set(db.objects) - {victim}
+
+
 def test_set_lists_lose_dead_entries_including_already_missing_ones():
     baseline = rewrite(load(str(TOASTCORE)), [leaf(load(str(TOASTCORE)))]).dropped[".owned_objects"]
     db = load(str(TOASTCORE))

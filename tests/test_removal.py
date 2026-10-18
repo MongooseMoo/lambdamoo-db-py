@@ -150,7 +150,8 @@ def test_a_set_file_chooses_what_the_same_options_would(tmp_path):
     typed = run("#2", "--name", "^generic player$", "--with-contents")
     assert typed.exit_code == 0, typed.output
     kept = tmp_path / "set.txt"
-    kept.write_text("; the wizard\n#2\n\n--name ^generic player$\n--with-contents\n--empty #0.x\n", encoding="utf-8")
+    kept.write_text("; the wizard\n#2\n\n--name ^generic player$\n--with-contents\n--keep-numbers\n--empty #0.x\n",
+                    encoding="utf-8")
     from_file = run("--set", str(kept))
     assert from_file.exit_code == 0, from_file.output
     assert from_file.output == typed.output
