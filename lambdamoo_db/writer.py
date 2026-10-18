@@ -431,7 +431,8 @@ class Writer:
         self.writeCollection(self.db.queuedTasks, templates.task_count, self.writeQueuedTask)
 
     def writeQueuedTask(self, task: QueuedTask) -> None:
-        taskHeader = templates.task_header.format(**asdict(task))
+        # Not recursive: the task's values may be maps keyed by objects, which asdict would turn into dicts.
+        taskHeader = templates.task_header.format(**asdict(task, recurse=False))
         self.writeString(taskHeader)
         self.writeActivationAsPI(task.activation)
         self.writeRtEnv(task.rtEnv)
@@ -453,7 +454,7 @@ class Writer:
             self.writeInt(activation.threaded if activation.threaded is not None else 0)
             self.write(self._nl)
         # Activation header line
-        activation_header = templates.activation_header.format(**asdict(activation))
+        activation_header = templates.activation_header.format(**asdict(activation, recurse=False))
         self.writeString(activation_header)
         # Argstr placeholders
         self.writeString(activation.argstr)

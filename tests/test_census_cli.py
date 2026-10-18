@@ -17,7 +17,7 @@ def test_census_groups_by_owner_with_sizes_on_first_and_later_runs(tmp_path):
     for _ in range(2):  # the first run builds the offset index
         lines = run("--cache-dir", str(tmp_path), "--db", str(TOASTCORE), "census", "--limit", "2")
         assert lines[0] == "127 objects, 2082546 bytes, in 5 groups by owner"
-        assert lines[1].split()[:4] == ["55", "1138310", "#36", "Hacker"]
+        assert lines[1].split()[:5] == ["55", "1138310", "#36", "[player]", "Hacker"]
 
 
 def test_census_sizes_add_up_to_the_object_records_and_programs(tmp_path):

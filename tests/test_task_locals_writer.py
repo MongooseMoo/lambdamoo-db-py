@@ -33,6 +33,20 @@ def test_suspended_task_locals_keep_type_and_value():
     assert isinstance(locals_["w"], WaifReference)
 
 
+def test_queued_task_locals_may_be_maps_keyed_by_objects():
+    """The task and activation headers were formatted from a recursive asdict, which turns an ObjNum
+    map key into a dict and raised "unhashable type: 'dict'" (seen on the live dump of 2026-10-18)."""
+    from lambdamoo_db.database import ObjNum
+
+    db = load(str(Path(__file__).parent.parent / "toastcore.db"))
+    db.queuedTasks[0].rtEnv["seen"] = {ObjNum(5): 1}
+    db.queuedTasks[0].activation.rtEnv["seen"] = {ObjNum(6): 2}
+
+    task = rewrite(db).queuedTasks[0]
+
+    assert task.rtEnv["seen"] == {ObjNum(5): 1}
+
+
 def test_suspended_task_value_keeps_its_error_type():
     db = load(str(FIXTURES / "Suspended.db"))
     db.suspendedTasks[0].value = MooError(3)

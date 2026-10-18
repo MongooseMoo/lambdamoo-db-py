@@ -372,10 +372,12 @@ def _indexed(ctx: click.Context, path: str) -> LazyDatabase:
 @moodb.command()
 @click.option("--since", "old", type=click.Path(exists=True, dir_okay=False),
               help="Only objects this older dump does not have (by number).")
-@click.option("--by", "field", type=click.Choice(["owner", "parent", "location"]), default="owner", show_default=True)
+@click.option("--by", "field", type=click.Choice(["owner", "parent", "location", "object"]), default="owner",
+              show_default=True, help="`object` lists single objects, largest first.")
+@click.option("--name", "name_pattern", help="Only objects whose name matches this regex (case-insensitive).")
 @click.option("--limit", default=40, show_default=True, help="Groups to show.")
 @click.pass_context
-def census(ctx: click.Context, old: str | None, field: str, limit: int) -> None:
+def census(ctx: click.Context, old: str | None, field: str, name_pattern: str | None, limit: int) -> None:
     """Group objects by owner, first parent or location, with their size in the dump.
 
     Bytes are the object's record (which holds the waifs first written there)
@@ -386,14 +388,15 @@ def census(ctx: click.Context, old: str | None, field: str, limit: int) -> None:
     db = _indexed(ctx, ctx.obj["path"])
     index = db.index
     skip = set(_indexed(ctx, old).index.records) if old else set()
+    named = re.compile(name_pattern, re.I) if name_pattern else None
     groups: dict[int, list] = {}
     for o in db.object_heads():
-        if o.id in skip:
+        if o.id in skip or (named and not named.search(o.name)):
             continue
         start, end, anon = index.records[o.id]
         size = end - start + sum(e - s for s, e in index.programs.get(o.id, ()))
         key = {"owner": lambda: int(o.owner), "parent": lambda: int(o.parents[0]) if o.parents else -1,
-               "location": lambda: int(o.location)}[field]()
+               "location": lambda: int(o.location), "object": lambda: o.id}[field]()
         row = groups.setdefault(key, [0, 0, []])
         row[0] += 1
         row[1] += size
@@ -402,8 +405,133 @@ def census(ctx: click.Context, old: str | None, field: str, limit: int) -> None:
     objects, size = sum(r[0] for r in groups.values()), sum(r[1] for r in groups.values())
     click.echo(f"{objects} objects, {size} bytes, in {len(groups)} groups by {field}"
                + (f"; only objects {old} does not have" if old else ""))
+    players = {int(p) for p in db.players}
     for key, (n, b, examples) in sorted(groups.items(), key=lambda kv: -kv[1][1])[:limit]:
-        click.echo(f"{n:>7} {b:>12}  #{key} {db.name_of(key) or ''}  e.g. {', '.join(examples)}")
+        kind = f"[{_owner_kind(db, key, players)}] " if field == "owner" else ""
+        click.echo(f"{n:>7} {b:>12}  #{key} {kind}{db.name_of(key) or ''}  e.g. {', '.join(examples)}")
+
+
+@moodb.command()
+@click.argument("refs", nargs=-1)
+@click.option("--owned-by", multiple=True, help="Also remove this object and everything it owns (repeatable).")
+@click.option("--limit", default=40, show_default=True, help="Inbound references to list.")
+@click.pass_context
+def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...], limit: int) -> None:
+    """What removing objects would leave pointing at nothing.
+
+    The set is closed over descendants. Every slot outside the set that names
+    a removed object is listed by field, holder and target; entries in
+    .owned_objects/.lost_souls and in children/contents lists are only
+    counted, since the rewrite drops them. Also lists objects located inside
+    the set that stay, and players in the set.
+    """
+    from .removal import plan
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = load(ctx.obj["path"])
+    chosen = {_object(db, r).id for r in refs}
+    for r in owned_by:
+        owner = _object(db, r).id
+        chosen |= {owner} | {oid for oid, o in db.objects.items() if int(o.owner) == owner and not o.anon}
+    if not chosen:
+        raise click.UsageError("name objects to remove, or --owned-by")
+    p = plan(db, chosen)
+    click.echo(f"remove {len(p.removed)} objects: {len(p.chosen)} chosen, {len(p.descendants)} descendants")
+    if p.players:
+        click.echo("players removed: " + ", ".join(label(db, x) for x in sorted(p.players)))
+    click.echo(f"inbound references from outside: {sum(p.inbound.values())} slots")
+    by_field = Counter()
+    for (field, _, _), n in p.inbound.items():
+        by_field[field] += n
+    for field, n in by_field.most_common():
+        click.echo(f"{n:>8}  {field}")
+    by_holder = Counter()
+    for (_, holder, _), n in p.inbound.items():
+        by_holder[holder] += n
+    click.echo(f"by holder ({len(by_holder)}):")
+    for holder, n in by_holder.most_common(limit):
+        name = db.name_of(int(holder[1:])) if holder[:1] == "#" else None
+        click.echo(f"{n:>8}  {holder}" + (f" {moo_string(name)}" if name is not None else ""))
+    for (field, holder, target), n in p.inbound.most_common(limit):
+        click.echo(f"    {field}  {holder} -> {label(db, target)}" + (f"  x{n}" if n > 1 else ""))
+    click.echo("dropped by the rewrite: " + (", ".join(f"{f} {n}" for f, n in p.dropped.most_common()) or "nothing"))
+    click.echo(f"staying objects located inside the set: {len(p.stranded)}")
+    for oid, where in sorted(p.stranded.items())[:limit]:
+        click.echo(f"    {label(db, oid)} in #{where}")
+
+
+@moodb.command()
+@click.argument("out", type=click.Path(dir_okay=False))
+@click.argument("refs", nargs=-1)
+@click.option("--owned-by", multiple=True, help="Also remove this object and everything it owns (repeatable).")
+@click.option("--owner-to", help="Give surviving objects, verbs and properties owned by removed objects to this object.")
+@click.option("--strand-to", help="Move surviving objects located in removed ones here (#-1 for nowhere).")
+@click.option("--empty", "empties", multiple=True, metavar="REF.NAME",
+              help="Empty this property's value (same type) and clear descendants' own values; repeatable.")
+@click.pass_context
+def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple[str, ...],
+            owner_to: str | None, strand_to: str | None, empties: tuple[str, ...]) -> None:
+    """Write OUT: the dump without the named objects, numbered densely.
+
+    Removes the objects (and their descendants), numbers the rest #0.. in their
+    old order with no recycled slots, and rewrites every reference: values,
+    the object table, verb code literals, tasks. A reference to a removed or
+    missing object becomes a distinct negative number (base - old). Writes
+    OUT.map.json (old -> new) and prints what changed. Refuses while anything
+    surviving is owned by, or located in, a removed object, unless --owner-to
+    or --strand-to says where it goes.
+    """
+    from .rewrite import RewriteRefused, empty_property
+    from .rewrite import rewrite as rewrite_db
+    from .writer import Writer
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    if Path(out).resolve() == Path(ctx.obj["path"]).resolve():
+        raise click.UsageError("OUT must not be the dump being read")
+    db = load(ctx.obj["path"])
+    chosen = {_object(db, r).id for r in refs}
+    for r in owned_by:
+        owner = _object(db, r).id
+        chosen |= {owner} | {oid for oid, o in db.objects.items() if int(o.owner) == owner and not o.anon}
+    target = {"owner_to": owner_to, "strand_to": strand_to}
+    resolved = {k: (int(v[1:]) if v.startswith("#-") else _object(db, v).id) if v else None for k, v in target.items()}
+    emptied = []
+    try:
+        for spec in empties:
+            ref, _, name = spec.rpartition(".")
+            if not ref or not name:
+                raise click.UsageError(f"--empty wants REF.NAME, got {spec!r}")
+            emptied.append(f"{spec} {empty_property(db, _object(db, ref).id, name)}")
+        report = rewrite_db(db, chosen, **resolved)
+    except RewriteRefused as e:
+        raise click.ClickException(str(e)) from e
+    with open(out, "w", encoding="latin-1", newline="") as f:
+        Writer(db=db, output_file=f).writeDatabase()
+    Path(out + ".map.json").write_text(json.dumps({"base": report.base, "map": report.renumbered}))
+    p = report.plan
+    click.echo(f"removed {len(p.removed)} objects ({len(p.chosen)} chosen, {len(p.descendants)} descendants); "
+               f"{db.total_objects} permanent objects now, highest #{db.total_objects - 1}")
+    click.echo(f"dead numbers: base {report.base}; {sum(report.dead_slots.values())} slots")
+    for field, n in report.dead_slots.most_common():
+        click.echo(f"{n:>10}  {field}")
+    click.echo("dropped: " + (", ".join(f"{k} {n}" for k, n in report.dropped.most_common()) or "nothing"))
+    click.echo("reassigned: " + (", ".join(f"{k} {n}" for k, n in report.reassigned.items()) or "nothing"))
+    click.echo("tasks dropped: " + (", ".join(f"{s} {t}" for s, t in report.tasks_dropped) or "none"))
+    click.echo("emptied (slots changed): " + (", ".join(emptied) or "nothing"))
+    click.echo(f"wrote {out} and {out}.map.json")
+
+
+def _owner_kind(db: LazyDatabase, oid: int, players: set[int]) -> str:
+    """What an owner is: a player, an object that owns itself, another object, nothing (#-1) or missing."""
+    if oid < 0:
+        return "nothing"
+    if oid not in db.index.records:
+        return "missing"
+    if oid in players:
+        return "player"
+    return "self-owned" if int(db.read_head(oid).owner) == oid else "object"
 
 
 @moodb.command()
@@ -439,9 +567,11 @@ def obj(ctx: click.Context, ref: str) -> None:
               help="One line per value: REF's effective values, then every descendant's own (not clear) values.")
 @click.option("--group", is_flag=True,
               help="With -r: one line per distinct name and value, with how many objects hold it and the first five.")
+@click.option("--largest", type=int, metavar="N",
+              help="Only the N stored (not clear) values taking the most bytes in the dump, largest first.")
 @click.pass_context
 def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[str, ...], recursive: bool,
-          group: bool) -> None:
+          group: bool, largest: int | None) -> None:
     """List every property of an object, own and inherited, with effective values."""
     db, names = _db(ctx)
     o = _object(db, ref)
@@ -451,6 +581,20 @@ def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[
     def wanted(name: str) -> bool:
         return not patterns or any(fnmatchcase(name.lower(), g) for g in patterns)
 
+    if largest is not None:
+        from io import StringIO
+
+        from .writer import Writer
+
+        def size(value) -> int:
+            out = StringIO()
+            Writer(db=db, output_file=out).writeValue(value)
+            return len(out.getvalue())
+
+        sized = sorted(((size(v), n, v) for n, v in stored_properties(db, o) if wanted(n)), key=lambda r: -r[0])
+        for nbytes, name, value in sized[:largest]:
+            click.echo(f"{nbytes:>10}  .{name} = {format_value(value, limit or 60)}")
+        return
     if group and not recursive:
         raise click.UsageError("--group needs -r")
     if recursive:
