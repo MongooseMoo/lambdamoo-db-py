@@ -87,15 +87,28 @@ def plan(db: MooDatabase, chosen: Iterable[int], with_contents: bool = False) ->
 
 
 def _created(db: MooDatabase, oid: int) -> int | None:
-    """The object's `creation_time` property, or None when it has none or it is not a number."""
+    """When the object was made: its `creation_time` property, or None when unknown.
+
+    Some builders leave `creation_time` unset: 0, or clear (a parent's value). For those, a first
+    placement (`last_move` from #-1) gives the time instead; an object moved in from elsewhere has
+    no such evidence and stays unknown.
+    """
     o = db.objects.get(oid)
     if o is None:
         return None
     try:
-        value = lookup_property(db, o, "creation_time").value
+        hit = lookup_property(db, o, "creation_time")
     except LookupFailed:
         return None
-    return value if isinstance(value, int) else None
+    if not isinstance(hit.value, int):
+        return None
+    if hit.value and hit.value_from is o:
+        return hit.value
+    move = o.last_move if isinstance(o.last_move, dict) else {}
+    source, when = move.get("source"), move.get("time")
+    if source is not None and int(source) == -1 and isinstance(when, int):
+        return when
+    return None
 
 
 def waif_holders(db: MooDatabase) -> dict[int, set[int]]:

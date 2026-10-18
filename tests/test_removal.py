@@ -74,6 +74,31 @@ def test_with_contents_takes_what_is_inside_but_never_a_player_or_an_older_objec
     assert not plan(db, [room], with_contents=True).contents
 
 
+def test_created_falls_back_to_first_placement_only_when_creation_time_is_unset():
+    from lambdamoo_db.removal import _created
+
+    db = load(str(TOASTCORE))
+    oid = next(oid for oid, o in db.objects.items() if oid > 1 and o.propdefs_count)
+    o = db.objects[oid]
+    o.properties[0].propertyName = "creation_time"
+    o.properties[0].value = 700
+    assert _created(db, oid) == 700
+    o.properties[0].value = 0
+    o.last_move = {"source": ObjNum(-1), "time": 500}
+    assert _created(db, oid) == 500
+    o.last_move = {"source": ObjNum(2), "time": 500}  # moved in from somewhere: no evidence
+    assert _created(db, oid) is None
+    o.last_move = -1
+    assert _created(db, oid) is None
+    from lambdamoo_db.inspection import CLEAR, find_slot
+
+    child = next(c for c in db.objects.values() if o.id in [int(p) for p in c.parents])
+    child.properties[find_slot(db, child, "creation_time").index].value = CLEAR  # inherits the parent's value
+    child.last_move = {"source": ObjNum(-1), "time": 900}
+    o.properties[0].value = 700
+    assert _created(db, child.id) == 900
+
+
 def test_refs_skip_leaves_out_named_properties(tmp_path):
     from io import StringIO
 
