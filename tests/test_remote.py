@@ -127,7 +127,7 @@ def prop(name, value, readable=True):
 def test_built_database_reads_back_with_moodb(tmp_path):
     root = record(1, "Root Class", -1, [prop("description", "")])
     verb = {"index": 1, "info": [2, "rxd", "sit"], "args": ["any", "on top of/on/onto/upon", "this"],
-            "lines": 2, "code": ['player:tell("You sit.");', "return 1;"]}
+            "lines": 4, "code": ['"sit on <seat>";', '"  takes a \\"seat\\"";', 'player:tell("You sit.");', "return 1;"]}
     stand = {"index": 2, "info": [2, "rx", "stand"], "args": ["this", "none", "none"], "lines": 0, "code": []}
     hidden = {"index": 3, "info": [2, "x", "count"], "args": ["this", "any", "any"], "lines": -1, "code": None}
     seat = record(5, "Generic Seat", 1, [prop("seats", 4), prop("secret", None, readable=False),
@@ -154,6 +154,15 @@ def test_built_database_reads_back_with_moodb(tmp_path):
     code = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "code", "#5:sit"])
     assert code.exit_code == 0, code.output
     assert 'player:tell("You sit.");' in code.output and "return 1;" in code.output
+    listed = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "commands", "#5", "-i", "--lines", "1"])
+    assert listed.exit_code == 0, listed.output
+    assert listed.output.splitlines() == [
+        "== #5 Generic Seat  (under #1 Root Class)",
+        '  #5:[0] "sit"  any on top of/on/onto/upon this',
+        "      sit on <seat>",
+        '  #5:[1] "stand"  this none none',
+        '  #5:[2] "count"  this any any',
+    ]
     verbs = CliRunner().invoke(moodb, ["--db", str(out), "--no-cache", "verbs", "#5"])
     assert verbs.exit_code == 0, verbs.output
     assert "any on top of/on/onto/upon this" in verbs.output

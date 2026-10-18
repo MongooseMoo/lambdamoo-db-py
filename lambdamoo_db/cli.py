@@ -417,6 +417,52 @@ def verbs(ctx: click.Context, ref: str, inherited: bool) -> None:
             click.echo(f"#{a.id}:[{idx}] {verb_summary(v)}")
 
 
+def _leading_comments(code) -> list[str]:
+    """The string-statement comments a program starts with, unquoted."""
+    found = []
+    for line in code or []:
+        match = re.fullmatch(r'\s*"((?:[^"\\]|\\.)*)";\s*', line)
+        if not match:
+            break
+        found.append(re.sub(r"\\(.)", r"\1", match[1]))
+    return found
+
+
+@moodb.command()
+@click.argument("refs", nargs=-1, required=True)
+@click.option("-i", "--inherited", is_flag=True, help="Also list commands of every ancestor.")
+@click.option("--lines", type=click.IntRange(min=0), default=3, show_default=True,
+              help="How many of each command's opening comment lines to show.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.pass_context
+def commands(ctx: click.Context, refs: tuple[str, ...], inherited: bool, lines: int, fmt: str) -> None:
+    """What players can type at each object: verbs other than `this none this`, with their opening comments."""
+    db, names = _db(ctx)
+    records = []
+    for ref in refs:
+        o = _object(db, ref)
+        chain = db.ancestors(o) if inherited else [o]
+        record = {"object": o.id, "name": o.name, "parents": [a.id for a in db.ancestors(o)[1:]], "commands": []}
+        for a in chain:
+            for idx, v in enumerate(a.verbs):
+                args = verb_args(v)
+                if args == "this none this":
+                    continue
+                record["commands"].append({"object": a.id, "index": idx, "names": v.name, "args": args,
+                                           "comments": _leading_comments(v.code)[:lines]})
+        records.append(record)
+    if fmt == "json":
+        click.echo(json.dumps(records, ensure_ascii=True))
+        return
+    for record in records:
+        chain = " > ".join(f"#{n} {db.name_of(n)}" for n in record["parents"])
+        click.echo(f"== #{record['object']} {record['name']}" + (f"  (under {chain})" if chain else ""))
+        for c in record["commands"]:
+            click.echo(f"  #{c['object']}:[{c['index']}] \"{c['names']}\"  {c['args']}")
+            for comment in c["comments"]:
+                click.echo(f"      {comment}")
+
+
 def _print_program(db, names, o, idx: int, v, line_numbers: bool) -> None:
     click.echo(f"@program {label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
     if v.code is None:
