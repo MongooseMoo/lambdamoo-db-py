@@ -104,14 +104,13 @@ def value_kind(value: Any) -> str:
 def encode_value(value: Any, db=None, *, field_filter=None, include_heap=True) -> dict:
     """Encode typed evidence, optionally selecting record fields before traversal.
 
-    field_filter(record, name, heap_body) selects stored fields. include_heap
+    field_filter(record, name) selects stored fields. include_heap
     controls node expansion only; reference tags and missing-target checks stay.
     """
     pending = []
     scheduled = set()
     nodes = []
     active = set()
-    heap_body = False
 
     def schedule(reference):
         if include_heap and reference not in scheduled:
@@ -167,11 +166,10 @@ def encode_value(value: Any, db=None, *, field_filter=None, include_heap=True) -
         if attrs.has(type(v)):
             return {'type': 'record', 'record_type': type(v).__name__,
                     'fields': {f.name: encode(getattr(v, f.name, UNSET)) for f in attrs.fields(type(v))
-                               if field_filter is None or field_filter(v, f.name, heap_body)}}
+                               if field_filter is None or field_filter(v, f.name)}}
         raise ValueError(f'unsupported parsed value type: {type(v).__name__}')
 
     root = encode(value)
-    heap_body = True
     while pending:
         kind, number = heapq.heappop(pending)
         node = db.waifs.get(number) if kind == 'waif' else db.objects.get(number)
