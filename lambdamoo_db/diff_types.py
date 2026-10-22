@@ -101,15 +101,20 @@ def value_kind(value: Any) -> str:
     raise ValueError(f'unsupported parsed value type: {type(value).__name__}')
 
 
-def encode_value(value: Any, db=None) -> dict:
-    """Encode parsed values losslessly; heap references use a finite per-side node table."""
+def encode_value(value: Any, db=None, *, field_filter=None, include_heap=True) -> dict:
+    """Encode typed evidence, optionally selecting record fields before traversal.
+
+    field_filter(record, name, heap_body) selects stored fields. include_heap
+    controls node expansion only; reference tags and missing-target checks stay.
+    """
     pending = []
     scheduled = set()
     nodes = []
     active = set()
+    heap_body = False
 
     def schedule(reference):
-        if reference not in scheduled:
+        if include_heap and reference not in scheduled:
             scheduled.add(reference)
             heapq.heappush(pending, reference)
 
@@ -161,10 +166,12 @@ def encode_value(value: Any, db=None) -> dict:
             return {'type': 'map', 'entries': [{'key': encode(k), 'value': encode(x)} for k, x in v.items()]}
         if attrs.has(type(v)):
             return {'type': 'record', 'record_type': type(v).__name__,
-                    'fields': {f.name: encode(getattr(v, f.name, UNSET)) for f in attrs.fields(type(v))}}
+                    'fields': {f.name: encode(getattr(v, f.name, UNSET)) for f in attrs.fields(type(v))
+                               if field_filter is None or field_filter(v, f.name, heap_body)}}
         raise ValueError(f'unsupported parsed value type: {type(v).__name__}')
 
     root = encode(value)
+    heap_body = True
     while pending:
         kind, number = heapq.heappop(pending)
         node = db.waifs.get(number) if kind == 'waif' else db.objects.get(number)

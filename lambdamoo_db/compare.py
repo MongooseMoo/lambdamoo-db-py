@@ -849,34 +849,19 @@ class _SnapshotComparison:
         """Encode complete evidence for the selected stored-field scope only."""
         selected = self.sections if selected is None else set(selected)
 
-        def restrict(encoded, heap_body=False):
-            if not isinstance(encoded, dict):
-                return encoded
-            if encoded.get('type') == 'graph':
-                root = restrict(encoded['root'], heap_body)
-                if 'heap' not in selected:
-                    return root
-                return {'type': 'graph', 'root': root,
-                        'nodes': [{**node, 'value': restrict(node['value'], True)} for node in encoded['nodes']]}
-            if encoded.get('type') == 'record' and encoded.get('record_type') == 'MooObject':
-                fields = {}
-                for field, child in encoded['fields'].items():
-                    section = FIELD_COVERAGE[MooObject][field]
-                    include = section == 'identity' or section in selected
-                    if heap_body:
-                        include = section != 'serialization' or self.options.view == 'checkpoint'
-                    if include:
-                        fields[field] = restrict(child, heap_body)
-                return {**encoded, 'fields': fields}
-            if encoded.get('type') == 'record' and encoded.get('record_type') == 'Verb':
-                return {**encoded, 'fields': {field: restrict(child, heap_body) for field, child in encoded['fields'].items() if field != 'object'}}
-            return {field: [restrict(child, heap_body) for child in item] if isinstance(item, list)
-                           else restrict(item, heap_body) if isinstance(item, dict) else item
-                    for field, item in encoded.items()}
-
         # A bare anonymous lifecycle record is itself heap evidence, just as
         # an anonymous node inside a graph table is. Heap owns all its fields.
-        return restrict(encode_value(value, database), isinstance(value, MooObject) and value.anon and 'heap' in selected)
+        heap_root = isinstance(value, MooObject) and value.anon and 'heap' in selected
+
+        def include_field(record, field, heap_body):
+            if isinstance(record, MooObject):
+                section = FIELD_COVERAGE[MooObject][field]
+                if heap_root or heap_body:
+                    return section != 'serialization' or self.options.view == 'checkpoint'
+                return section == 'identity' or section in selected
+            return not isinstance(record, Verb) or field != 'object'
+
+        return encode_value(value, database, field_filter=include_field, include_heap='heap' in selected)
 
     def emit(self, entity, category, section, old_path, new_path, old, new, kind='changed', definite=True, details=None, applicable=None, evidence_sections=None):
         applicable = applicable or (section,)
