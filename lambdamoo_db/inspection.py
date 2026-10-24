@@ -691,6 +691,96 @@ def find_references(db: MooDatabase, target: MooObject, names: dict[int, str]) -
         yield Reference(hit.obj, f":[{hit.index}] {hit.verb.name.split(' ')[0]}:{hit.lineno}", hit.line.strip())
 
 
+@attrs.frozen
+class Cluster:
+    root: MooObject
+    members: list[MooObject]  # the root, then everything inside it, depth-first
+    parents: Counter[int]  # parent -> how many members have it
+    with_verbs: list[MooObject]  # members that define verbs
+    definitions: Counter[str]  # property name -> how many members define it
+    outside_children: list[tuple[MooObject, MooObject]]  # (member, its child that is not a member)
+    players: list[MooObject]
+
+
+@attrs.frozen
+class InboundReference:
+    member: int
+    holder: MooObject  # an object outside every cluster
+    where: str  # ".prop[2]<waif #1641>.dest" or ":[3] verbname:12"
+    text: str  # the code line, or ""
+
+
+_OBJECT_NUMBER = re.compile(r"(?<![\w#$-])#(\d+)(?![0-9])")
+
+
+def clusters(db: MooDatabase, roots: list[MooObject]) -> tuple[list[Cluster], list[InboundReference]]:
+    """Each root with everything inside it, what those objects define, and what outside them refers to them.
+
+    "Outside" means outside every cluster asked for, so clusters that refer to
+    each other can be judged together. Inbound references are property values
+    holding a member's number (through lists, maps and waif bodies) and verb
+    code naming ``#N``. A member's ``$name`` shows as #0's property holding it.
+    """
+    found = []
+    union: set[int] = set()
+    for root in roots:
+        members = [root, *descendants(db, root, "contents")]
+        ids = {m.id for m in members}
+        union |= ids
+        found.append(Cluster(
+            root,
+            members,
+            Counter(int(p) for m in members for p in m.parents),
+            [m for m in members if m.verbs],
+            Counter(p.propertyName for m in members for p in own_properties(m)),
+            [(m, db.objects[int(c)]) for m in members for c in m.children if int(c) not in ids and int(c) in db.objects],
+            [m for m in members if m.flags & ObjectFlags.USER],
+        ))
+    inbound: list[InboundReference] = []
+
+    def walk(value: Any, where: str, open_waifs: frozenset[int]) -> Iterator[tuple[int, str]]:
+        if isinstance(value, ObjNum):
+            if int(value) in union:
+                yield int(value), where
+        elif isinstance(value, list):
+            for i, item in enumerate(value, 1):
+                yield from walk(item, f"{where}[{i}]", open_waifs)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from walk(key, f"{where}.keys[{_format(key)}]", open_waifs)
+                yield from walk(item, f"{where}[{_format(key)}]", open_waifs)
+        elif isinstance(value, WaifReference):
+            waif = db.waifs.get(value.index)
+            if waif is None or value.index in open_waifs:
+                return
+            names = waif_slot_names(db, int(waif.waif_class))
+            for slot, item in waif.props:
+                name = names[slot] if slot < len(names) else f"slot{slot}"
+                yield from walk(item, f"{where}<waif #{int(waif.waif_class)}>.{name}", open_waifs | {value.index})
+
+    for obj in db.objects.values():
+        if obj.id in union:
+            continue
+        names = [p.propertyName for a in db.ancestors(obj) for p in own_properties(a)]
+        for index, prop in enumerate(obj.properties):
+            if prop.value is CLEAR:
+                continue
+            name = names[index] if index < len(names) else f"slot{index}"
+            for member, where in walk(prop.value, f".{name}", frozenset()):
+                inbound.append(InboundReference(member, obj, where, ""))
+    programs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+    for o in programs:
+        if o.id in union:
+            continue
+        for idx, v in enumerate(o.verbs):
+            original = v.code or []
+            # String literals, comments included, are masked: "Last modified … (#4913@Mongoose)" names no object.
+            for n, line in enumerate(mask_moo_strings(original), 1):
+                for number in {int(m) for m in _OBJECT_NUMBER.findall(line)} & union:
+                    inbound.append(InboundReference(number, o, f":[{idx}] {v.name.split(' ')[0]}:{n}", original[n - 1].strip()))
+    return found, inbound
+
+
 # --------------------------------------------------------------------------
 # Stored values
 
