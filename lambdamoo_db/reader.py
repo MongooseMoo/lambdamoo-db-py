@@ -53,6 +53,32 @@ class _LineSource:
         self.offset = end
         return self.data[start:end].decode("latin-1")
 
+    def _next(self) -> tuple[int, int] | None:
+        """Advance past the next line; its bounds without the delimiter, or None at the end."""
+        data = self.data
+        start = self.offset
+        if start >= len(data):
+            return None
+        end = data.find(b"\n", start)
+        self.last_line_start = start
+        if end == -1:
+            self.offset = end = len(data)
+        else:
+            self.offset = end + 1
+            if end > start and data[end - 1] == 13:
+                end -= 1
+        return start, end
+
+    def readvalue(self) -> str | None:
+        """The next line without its delimiter, as Reader.readString wants it; None at the end."""
+        bounds = self._next()
+        return None if bounds is None else self.data[bounds[0]:bounds[1]].decode("latin-1")
+
+    def readint(self) -> int | None:
+        """The next line as an integer, read from the bytes without decoding; None at the end."""
+        bounds = self._next()
+        return None if bounds is None else int(self.data[bounds[0]:bounds[1]])
+
 
 def load_bytes(data: bytes, filename: str = "<bytes>") -> MooDatabase:
     """Parse one frozen source without universal-newline translation."""
@@ -107,6 +133,10 @@ class Reader:
         self.filename = filename
         self.file = fio
         self.line = 0
+        # A dump is tens of millions of lines; a _LineSource hands each one over already
+        # stripped, and integers straight from the bytes.
+        self._readvalue = getattr(fio, "readvalue", None)
+        self._readint = getattr(fio, "readint", None)
         # Private split scanner mode: consume serialized structure to discover
         # boundaries without constructing semantic maps. Its temporary model
         # must never be returned as a loaded database.
@@ -226,6 +256,11 @@ class Reader:
     def readString(self) -> str:
         """Read a string from the database file"""
         self.line += 1
+        if self._readvalue is not None:
+            value = self._readvalue()
+            if value is None:
+                self.parse_error("unexpected end of source (EOF)", "unexpected_eof")
+            return value
         line = self.file.readline()
         if line == "":
             self.parse_error("unexpected end of source (EOF)", "unexpected_eof")
@@ -241,6 +276,15 @@ class Reader:
 
     def readInt(self) -> int:
         """Read an integer from the database file"""
+        if self._readint is not None:
+            self.line += 1
+            try:
+                value = self._readint()
+            except ValueError:
+                self.parse_error("invalid integer")
+            if value is None:
+                self.parse_error("unexpected end of source (EOF)", "unexpected_eof")
+            return value
         line = self.readString()
         try:
             return int(line)
@@ -638,7 +682,7 @@ class Reader:
                 logger.debug(f"  reading property[{idx}]")
             value = self.readValue(db)
             owner = self.readObjnum()
-            perms = PropertyFlags(self.readInt())
+            perms = self.readInt()  # Property's converter makes it PropertyFlags
             if debug:
                 logger.debug(f"    owner=#{owner}, perms={perms}")
             property = Property(propertyName, value, owner, perms)

@@ -17,6 +17,7 @@ from .inspection import (
     all_properties,
     answers_call,
     builtin_value,
+    clusters,
     code_fingerprint,
     defined_property_names,
     descendants,
@@ -853,8 +854,10 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
               help="With --verb: ignore matches made only through a catch-all name, one with no letter or digit "
                    "before its `*` (`*`, `@*`).")
 @click.option("-c", "--count", is_flag=True, help="Print only the number of hits for each TEXT.")
+@click.option("--by-name", is_flag=True, help="Without --verb or --prop: one line per distinct name, with how many objects have it, most first.")
 @click.pass_context
-def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, no_catchall: bool, count: bool) -> None:
+def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, no_catchall: bool, count: bool,
+         by_name: bool) -> None:
     """Find objects whose name or $name contains TEXT (case-insensitive).
 
     With --verb or --prop, find where a verb or property is defined instead.
@@ -864,8 +867,11 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
         raise click.UsageError("--glob needs --verb or --prop")
     if no_catchall and mode != "verb":
         raise click.UsageError("--no-catchall needs --verb")
+    if by_name and mode is not None:
+        raise click.UsageError("--by-name finds by object name; it does not go with --verb or --prop")
     db, names = _db(ctx)
     hits: dict[str, list[str]] = {t: [] for t in text}
+    found_names: dict[str, Counter[str]] = {t: Counter() for t in text}
 
     def calls(name, t):
         if not no_catchall:
@@ -895,10 +901,13 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
                 needle = t.lower().lstrip("$")
                 if needle in name.lower() or needle in names.get(num, "").lower():
                     hits[t].append(label(db, num, names))
+                    found_names[t][name] += 1
     for t, lines in hits.items():
         if count:
             click.echo(f"{len(lines):6d}  {t}")
             continue
+        if by_name:
+            lines = [f"{n:6d}  {moo_string(name)}" for name, n in found_names[t].most_common()]
         if len(hits) > 1:
             click.echo(f"== {t}")
         for line in lines:
@@ -923,6 +932,55 @@ def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool) -> None:
             if code_only and not r.where.startswith(":["):
                 continue
             click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {r.text}" if r.text else ""))
+
+
+@moodb.command()
+@click.argument("ref", nargs=-1, required=True)
+@click.option("--top", default=10, show_default=True, help="How many parents and definitions to name per cluster.")
+@click.option("--each", is_flag=True, help="List every outside reference, not a count per holding object.")
+@click.option("--each-under", type=int, metavar="N",
+              help="Also list each reference from holders with fewer than N, leaving whole-database lists as counts.")
+@click.pass_context
+def cluster(ctx: click.Context, ref: tuple[str, ...], top: int, each: bool, each_under: int | None) -> None:
+    """What would go with each REF and everything inside it: members, verbs and properties they define,
+    children and players among them, and what outside them refers to them.
+
+    "Outside" is outside every REF's cluster, so clusters given together are judged together.
+    """
+    db, names = _db(ctx)
+    found, inbound = clusters(db, [_object(db, one) for one in ref])
+
+    def ranked(counter, show) -> str:
+        if not counter:
+            return "none"
+        common = counter.most_common()
+        text = ", ".join(f"{show(k)} {n}" for k, n in common[:top])
+        return text + (f", and {len(common) - top} more" if len(common) > top else "")
+
+    for c in found:
+        r = c.root
+        click.echo(f"== {label(db, r.id, names)}  owner {label(db, int(r.owner), names)}  location {label(db, int(r.location), names)}")
+        click.echo(f"  members   {len(c.members)}")
+        click.echo(f"  parents   {ranked(c.parents, lambda p: label(db, p, names))}")
+        click.echo("  verbs     " + (", ".join(f"{label(db, m.id, names)} {len(m.verbs)}" for m in c.with_verbs) or "none"))
+        click.echo(f"  defines   {ranked(c.definitions, str)}")
+        click.echo("  children outside  " + (", ".join(f"{label(db, m.id, names)} > {label(db, k.id, names)}"
+                                                   for m, k in c.outside_children) or "none"))
+        click.echo("  players   " + (", ".join(label(db, m.id, names) for m in c.players) or "none"))
+    click.echo(f"== referenced from outside: {len(inbound)}")
+    if each:
+        for i in inbound:
+            click.echo(f"  {label(db, i.holder.id, names)}{i.where} -> #{i.member}" + (f": {i.text}" if i.text else ""))
+    else:
+        holders = Counter(i.holder.id for i in inbound)
+        members = {h: len({i.member for i in inbound if i.holder.id == h}) for h in holders}
+        for h, n in holders.most_common():
+            click.echo(f"  {n:6d} references to {members[h]} members  {label(db, h, names)}")
+            if each_under is not None and n < each_under:
+                for i in inbound:
+                    if i.holder.id == h:
+                        click.echo(f"           {i.where} -> {label(db, i.member, names)}" + (f": {i.text}" if i.text else ""))
+    click.echo(f"total  {sum(len(c.members) for c in found)} members in {len(found)} clusters")
 
 
 @moodb.command()

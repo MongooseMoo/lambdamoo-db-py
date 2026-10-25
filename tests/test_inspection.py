@@ -12,6 +12,7 @@ from lambdamoo_db.inspection import (
     added_property_definitions,
     added_verb_lines,
     all_properties,
+    clusters,
     find_slot,
     find_verb,
     format_value,
@@ -490,6 +491,40 @@ def test_value_holders_counts_slots_that_are_not_clear():
     assert value_holders(db, db.objects[2], "EXTRA") == (1, 2)
 
 
+def test_clusters_report_members_and_outside_references():
+    from lambdamoo_db.database import Waif, WaifReference
+
+    db = MooDatabase()
+    # #10 holds #11, which holds #12. #13 is #11's child, outside. #1 is outside and refers in.
+    for num, parents in ((0, []), (1, []), (5, []), (10, [1]), (11, [1]), (12, [1]), (13, [11])):
+        db.objects[num] = MooObject(num, f"obj{num}", 0, 2, -1, [ObjNum(p) for p in parents])
+    db.objects[10].contents, db.objects[11].location = [ObjNum(11)], 10
+    db.objects[11].contents, db.objects[12].location = [ObjNum(12)], 11
+    db.objects[11].children = [ObjNum(13)]
+    db.objects[12].flags = 1
+    _define(db, 10, ("b_nonce", "x"))
+    _define(db, 11, ("b_nonce", "x"))
+    _define(db, 5, (":dest", 0))
+    db.waifs[0] = Waif(5, 2, [(0, ObjNum(11))])
+    _define(db, 1, ("rooms", [ObjNum(12), ObjNum(120)]), ("exit", WaifReference(0)))
+    for num, line in ((1, "#12:go(#120);"), (12, "return #11;")):
+        v = Verb("go", ObjNum(2), 173, -1, num)
+        v.code = [line]
+        db.objects[num].verbs = [v]
+
+    (c,), inbound = clusters(db, [db.objects[10]])
+    assert [m.id for m in c.members] == [10, 11, 12]
+    assert c.parents == {1: 3}
+    assert [m.id for m in c.with_verbs] == [12]
+    assert c.definitions == {"b_nonce": 2}
+    assert [(m.id, k.id) for m, k in c.outside_children] == [(11, 13)]
+    assert [m.id for m in c.players] == [12]
+    # #13 and the member's own code are not outside references; #120 is a different number.
+    assert sorted((i.member, i.holder.id, i.where) for i in inbound) == [
+        (11, 1, ".exit<waif #5>.dest"), (12, 1, ".rooms[1]"), (12, 1, ":[0] go:1"),
+    ]
+
+
 def test_cli_added_props(monkeypatch, tmp_path):
     import lambdamoo_db.cli as cli
 
@@ -623,6 +658,13 @@ def test_cli_find_several_texts_glob_and_count():
 
     r = run("find", "--glob", "string_utils")
     assert r.exit_code == 2 and "--glob needs --verb or --prop" in r.output
+
+    hits = run("find", "generic").output.splitlines()
+    grouped = run("find", "--by-name", "generic").output.splitlines()
+    counts = [int(line.split()[0]) for line in grouped]
+    assert sum(counts) == len(hits) and counts == sorted(counts, reverse=True)
+    assert {line.strip().split("  ", 1)[1] for line in grouped} == {'"' + line.split(' "', 1)[1] for line in hits}
+    assert run("find", "--by-name", "--prop", "x").exit_code == 2
 
 
 def test_cli_code_bare_ref_prints_every_verb():
