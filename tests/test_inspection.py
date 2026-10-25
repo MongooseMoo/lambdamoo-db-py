@@ -525,6 +525,26 @@ def test_clusters_report_members_and_outside_references():
     ]
 
 
+def test_cli_cluster_holding_takes_outermost_definers_as_roots(monkeypatch):
+    import lambdamoo_db.cli as cli
+
+    db = MooDatabase()
+    # #10 holds #11; both and the loose #20 define b_nonce, so the roots are #10 and #20.
+    for num in (0, 10, 11, 20):
+        db.objects[num] = MooObject(num, f"obj{num}", 0, 2, -1, [])
+    db.objects[10].contents, db.objects[11].location = [ObjNum(11)], 10
+    for num in (10, 11, 20):
+        _define(db, num, ("B_Nonce", "x"))
+    monkeypatch.setattr(cli, "open_indexed", lambda *_: db)
+    r = CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "cluster", "--holding", "b_nonce"])
+    assert r.exit_code == 0, r.output
+    assert [line.split("  ")[0] for line in r.output.splitlines() if line.startswith("== #")] == [
+        '== #10 "obj10"', '== #20 "obj20"',
+    ]
+    assert r.output.splitlines()[-1] == "total  3 members in 2 clusters"
+    assert CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "cluster"]).exit_code == 2
+
+
 def test_cli_added_props(monkeypatch, tmp_path):
     import lambdamoo_db.cli as cli
 

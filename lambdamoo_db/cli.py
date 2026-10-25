@@ -935,20 +935,41 @@ def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool) -> None:
 
 
 @moodb.command()
-@click.argument("ref", nargs=-1, required=True)
+@click.argument("ref", nargs=-1)
+@click.option("--holding", metavar="PROP",
+              help="Also take as roots the objects that define property PROP, leaving out those inside another of them.")
 @click.option("--top", default=10, show_default=True, help="How many parents and definitions to name per cluster.")
 @click.option("--each", is_flag=True, help="List every outside reference, not a count per holding object.")
 @click.option("--each-under", type=int, metavar="N",
               help="Also list each reference from holders with fewer than N, leaving whole-database lists as counts.")
 @click.pass_context
-def cluster(ctx: click.Context, ref: tuple[str, ...], top: int, each: bool, each_under: int | None) -> None:
+def cluster(ctx: click.Context, ref: tuple[str, ...], holding: str | None, top: int, each: bool,
+            each_under: int | None) -> None:
     """What would go with each REF and everything inside it: members, verbs and properties they define,
     children and players among them, and what outside them refers to them.
 
     "Outside" is outside every REF's cluster, so clusters given together are judged together.
     """
+    if not ref and holding is None:
+        raise click.UsageError("give a REF or --holding PROP")
     db, names = _db(ctx)
-    found, inbound = clusters(db, [_object(db, one) for one in ref])
+    roots = [_object(db, one) for one in ref]
+    if holding is not None:
+        held = {num for num, defined in defined_property_names(db)
+                if any(isinstance(n, str) and n.lower() == holding.lower() for n in defined)}
+
+        def inside_another(num: int) -> bool:
+            seen = {num}
+            where = int(db.objects[num].location)
+            while where in db.objects and where not in seen:
+                if where in held:
+                    return True
+                seen.add(where)
+                where = int(db.objects[where].location)
+            return False
+
+        roots += [db.objects[num] for num in sorted(held) if not inside_another(num)]
+    found, inbound = clusters(db, roots)
 
     def ranked(counter, show) -> str:
         if not counter:
