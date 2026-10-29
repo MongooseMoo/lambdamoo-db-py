@@ -199,6 +199,40 @@ def test_open_indexed_parses_older_formats_whole(tmp_path):
     assert not (tmp_path / "cache").exists()
 
 
+@pytest.mark.parametrize("path", V17_DUMPS, ids=lambda p: p.name)
+def test_cached_info_matches_full_parse_without_loading_every_object(path, tmp_path, monkeypatch):
+    plain = CliRunner().invoke(moodb, ["--db", str(path), "--no-cache", "info"])
+    assert plain.exit_code == 0, plain.output
+    open_indexed(path, tmp_path)
+    _no_full_parse(monkeypatch)
+    cached = CliRunner().invoke(moodb, ["--db", str(path), "--cache-dir", str(tmp_path), "info"])
+    assert cached.exit_code == 0, cached.output
+    assert cached.output == plain.output
+
+
+def test_info_counts_empty_and_absent_programs_separately_from_nonempty(tmp_path, monkeypatch):
+    db = load(str(TOASTCORE))
+    obj = db.objects[0]
+    for name, code in [("absent", None), ("empty", []), ("nonempty", ["return 1;"])]:
+        verb = Verb(name, ObjNum(2), 0, -1, obj.id)
+        verb.code = code
+        obj.verbs.append(verb)
+    path = tmp_path / "programs.db"
+    with path.open("w", encoding="latin-1", newline="") as output:
+        dump(db, output)
+    args = ["--db", str(path)]
+    plain = CliRunner().invoke(moodb, [*args, "--no-cache", "info"])
+    assert plain.exit_code == 0, plain.output
+    definitions = sum(len(o.verbs) for o in db.objects.values())
+    nonempty = sum(bool(v.code) for o in db.objects.values() for v in o.verbs)
+    assert f"verbs     {definitions} ({nonempty} with code)" in plain.output
+    open_indexed(path, tmp_path / "cache")
+    _no_full_parse(monkeypatch)
+    cached = CliRunner().invoke(moodb, [*args, "--cache-dir", str(tmp_path / "cache"), "info"])
+    assert cached.exit_code == 0, cached.output
+    assert cached.output == plain.output
+
+
 @pytest.mark.parametrize(
     "query",
     [

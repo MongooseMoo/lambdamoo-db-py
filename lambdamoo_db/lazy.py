@@ -44,6 +44,8 @@ class DumpIndex:
     waif_homes: dict[int, int | None]  # waif -> the object whose record defines it; None for the header
     recycled: frozenset[int]
     total_verbs: int
+    verb_definitions: int
+    nonempty_programs: int
 
 
 class _IndexReader(Reader):
@@ -111,6 +113,8 @@ def build_index(db_path: str | os.PathLike[str]) -> tuple[DumpIndex, MooDatabase
         waif_homes={i: reader.waif_homes[i] for i in db.waifs},
         recycled=frozenset(db.recycled_objects),
         total_verbs=db.total_verbs,
+        verb_definitions=sum(len(o.verbs) for o in db.objects.values()),
+        nonempty_programs=sum(bool(v.code) for o in db.objects.values() for v in o.verbs),
     )
     return index, db
 

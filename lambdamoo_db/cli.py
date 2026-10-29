@@ -49,7 +49,7 @@ from .inspection import (
     verb_summary,
     verbcasecmp,
 )
-from .lazy import default_cache_dir, open_indexed
+from .lazy import LazyDatabase, default_cache_dir, open_indexed
 from .reader import load
 from .split import DEFAULT_MAX_PIECE_BYTES, SplitError, first_difference, join_dir, write_split
 
@@ -231,13 +231,18 @@ def _echo_existing_summary(continuity: dict[int, str], identity: str) -> None:
 def info(ctx: click.Context) -> None:
     """Summarise the dump: format, object, verb, player and task counts."""
     db, names = _db(ctx)
-    objs = list(db.objects.values())
-    anon = sum(1 for o in objs if o.anon)
-    verbs = [v for o in objs for v in o.verbs]
+    if isinstance(db, LazyDatabase):
+        anon = sum(anonymous for _, _, anonymous in db.index.records.values())
+        verbs = db.index.verb_definitions
+        with_code = db.index.nonempty_programs
+    else:
+        anon = sum(1 for o in db.objects.values() if o.anon)
+        verbs = sum(len(o.verbs) for o in db.objects.values())
+        with_code = sum(bool(v.code) for o in db.objects.values() for v in o.verbs)
     click.echo(f"dump      {ctx.obj['path']}")
     click.echo(f"format    {db.versionstring.strip()}")
-    click.echo(f"objects   {len(objs) - anon} (+{anon} anonymous), highest #{max(db.objects, default=-1)}, {len(db.recycled_objects)} recycled")
-    click.echo(f"verbs     {len(verbs)} ({sum(1 for v in verbs if v.code)} with code)")
+    click.echo(f"objects   {len(db.objects) - anon} (+{anon} anonymous), highest #{max(db.objects, default=-1)}, {len(db.recycled_objects)} recycled")
+    click.echo(f"verbs     {verbs} ({with_code} with code)")
     click.echo(f"players   {len(db.players)}")
     click.echo(f"$names    {len(names)}")
     click.echo(f"tasks     {len(db.queuedTasks)} queued, {len(db.suspendedTasks)} suspended, {len(db.interruptedTasks)} interrupted")
