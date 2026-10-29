@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from lambdamoo_db.database import MooDatabase
+from lambdamoo_db.database import MooDatabase, Property
+from lambdamoo_db.enums import PropertyFlags
 from lambdamoo_db.reader import ParseError, Reader, load, load_bytes
 from lambdamoo_db.map_keys import NUMERIC_MAP_KEY_POLICY, numeric_key_identity
 from lambdamoo_db.split import _LineSource
@@ -31,6 +32,31 @@ def test_record_delimiter_removes_only_one(data, expected):
     assert reader.readString() == expected
     with pytest.raises(Exception, match="[Ee][Oo][Ff]|end of"):
         reader.readString()
+
+
+def test_line_source_offsets_across_mixed_reads_and_eof():
+    source = _LineSource(b"12\r\nraw\n\xff\r\r\nlast\r")
+    assert source.readint() == 12
+    assert (source.last_line_start, source.offset) == (0, 4)
+    assert source.readline() == "raw\n"
+    assert (source.last_line_start, source.offset) == (4, 8)
+    assert source.readvalue() == "\xff\r"
+    assert (source.last_line_start, source.offset) == (8, 12)
+    assert source.readvalue() == "last\r"
+    assert (source.last_line_start, source.offset) == (12, 17)
+    assert source.readline() == ""
+    assert source.readint() is None
+    assert source.readvalue() is None
+    assert (source.last_line_start, source.offset) == (12, 17)
+
+
+def test_property_name_assignment_preserves_permission_conversion():
+    prop = Property(None, 42, 0, 1)
+    prop.propertyName = "inherited"
+    assert prop.propertyName == "inherited"
+    assert prop.perms is PropertyFlags.READ
+    prop.perms = 2
+    assert prop.perms is PropertyFlags.WRITE
 
 
 def test_immutable_bytes_and_file_loading_share_decoder(tmp_path):

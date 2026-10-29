@@ -519,10 +519,10 @@ fails, with that query's error and exit status.
 
 ### Speed and the index
 
-The first query on a v17 dump parses all of it once (about 25 s for a 94 MB
-dump) and saves an index: the byte offset of every object record and verb
-program, and every object's name. The index is about 1 MB. Later queries read
-only the records they need from the dump itself:
+The first query on a v17 dump parses all of it once and saves an index: the
+byte offset of every object record and verb program, every object's name,
+and verb counts. Later queries read only the records they need from the dump
+itself:
 
 - `obj`, `props`, `verbs`, `code`, `prop`, `children`, `contents`, `players`,
   `tasks` and `find TEXT` read a few records, or none.
@@ -530,8 +530,11 @@ only the records they need from the dump itself:
 - `find --verb` reads every object's verb definitions and `find --prop` the
   names of the properties each object defines; neither parses a property
   value or verb code.
-- `info`, `refs` and `values` look at every object, so they parse the whole
-  dump each time.
+- `info` uses indexed object and verb counts, reads the header for tasks, and
+  reads object #0 and its dependencies for `$names`; it does not parse every
+  object on a cached query. Empty programs are still excluded from "with code".
+- `refs` and `values` look at every object, so they parse the whole dump each
+  time.
 
 The index lives under `lambdamoo-db` in `$XDG_CACHE_HOME`, `%LOCALAPPDATA%` or
 `~/.cache`. Change that with `--cache-dir`. `--no-cache` parses the whole dump

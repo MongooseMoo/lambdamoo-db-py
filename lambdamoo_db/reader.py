@@ -1,5 +1,6 @@
 import re
 import math
+from io import BytesIO
 from logging import DEBUG, getLogger
 from typing import Any, NoReturn, Pattern, Protocol, Union
 
@@ -40,44 +41,44 @@ class _LineSource:
 
     def __init__(self, data: bytes) -> None:
         self.data = bytes(data)
-        self.offset = 0
-        self.last_line_start = 0
+        source = BytesIO(self.data)
+        self._readline = source.readline
+        self._tell = source.tell
+        self._last_line = b""
+
+    @property
+    def offset(self) -> int:
+        return self._tell()
+
+    @property
+    def last_line_start(self) -> int:
+        return self._tell() - len(self._last_line)
 
     def readline(self) -> str:
-        start = self.offset
-        if start >= len(self.data):
-            return ""
-        end = self.data.find(b"\n", start)
-        end = len(self.data) if end == -1 else end + 1
-        self.last_line_start = start
-        self.offset = end
-        return self.data[start:end].decode("latin-1")
+        return self._next().decode("latin-1")
 
-    def _next(self) -> tuple[int, int] | None:
-        """Advance past the next line; its bounds without the delimiter, or None at the end."""
-        data = self.data
-        start = self.offset
-        if start >= len(data):
-            return None
-        end = data.find(b"\n", start)
-        self.last_line_start = start
-        if end == -1:
-            self.offset = end = len(data)
-        else:
-            self.offset = end + 1
-            if end > start and data[end - 1] == 13:
-                end -= 1
-        return start, end
+    def _next(self) -> bytes:
+        """Read one LF-delimited line, retaining its delimiter and byte offsets."""
+        line = self._readline()
+        if line:
+            self._last_line = line
+        return line
 
     def readvalue(self) -> str | None:
         """The next line without its delimiter, as Reader.readString wants it; None at the end."""
-        bounds = self._next()
-        return None if bounds is None else self.data[bounds[0]:bounds[1]].decode("latin-1")
+        line = self._next()
+        if not line:
+            return None
+        if line.endswith(b"\n"):
+            line = line[:-1]
+            if line.endswith(b"\r"):
+                line = line[:-1]
+        return line.decode("latin-1")
 
     def readint(self) -> int | None:
         """The next line as an integer, read from the bytes without decoding; None at the end."""
-        bounds = self._next()
-        return None if bounds is None else int(self.data[bounds[0]:bounds[1]])
+        line = self._next()
+        return int(line) if line else None
 
 
 def load_bytes(data: bytes, filename: str = "<bytes>") -> MooDatabase:
