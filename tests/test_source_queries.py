@@ -85,6 +85,23 @@ def test_cli_summary_counts_all_matches_without_source_or_names(invoke):
     assert 'actor' not in result.output and 'inline' not in result.output
 
 
+def test_cli_verb_names_and_without_match_compose_with_source_filters(invoke):
+    result = invoke('grep', r'\.wizard', '--verb', 'string_only', '--code-only',
+                    '--wizard-owned', '--executable', '-L', '--format', 'json')
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data['matched_verbs'] == 1 and data['matched_lines'] == 0
+    assert [v['names'] for v in data['verbs']] == ['string_only']
+    assert 'lines' not in data['verbs'][0]
+    excluded = invoke('grep', r'\.wizard', '--verb', 'string_only', '--code-only',
+                      '--without', 'return', '-L', '--format', 'json')
+    assert excluded.exit_code == 0, excluded.output
+    assert json.loads(excluded.output)['matched_verbs'] == 0
+    matching = invoke('grep', r'\.wizard', '--verb', 'ordinary', '--format', 'json')
+    assert matching.exit_code == 0, matching.output
+    assert [v['names'] for v in json.loads(matching.output)['verbs']] == ['ordinary']
+
+
 def test_cli_json_page_keeps_global_counts_and_native_metadata(invoke):
     result = invoke('grep', r'\.wizard', '--code-only', '--wizard-owned', '--executable',
                     '--without', r'\$perm_utils\s*:', '--format', 'json', '--limit', '1', '--offset', '1')

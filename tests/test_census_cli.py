@@ -1,0 +1,101 @@
+from collections import Counter
+from pathlib import Path
+
+from click.testing import CliRunner
+
+import lambdamoo_db.cli as cli
+from lambdamoo_db.reader import load
+
+TOASTCORE = Path(__file__).parent.parent / "toastcore.db"
+
+
+def run(*args):
+    result = CliRunner().invoke(cli.moodb, list(args))
+    assert result.exit_code == 0, result.output
+    return result.output.splitlines()
+
+
+def test_census_groups_by_owner_with_sizes_on_first_and_later_runs(tmp_path):
+    for _ in range(2):  # the first run builds the offset index
+        lines = run("--cache-dir", str(tmp_path), "--db", str(TOASTCORE), "census", "--limit", "2")
+        assert lines[0] == "127 objects, 2082546 bytes, in 5 groups by owner"
+        assert lines[1].split()[:5] == ["55", "1138310", "#36", "[player]", "Hacker"]
+
+
+def test_census_sizes_add_up_to_the_object_records_and_programs(tmp_path):
+    lines = run("--cache-dir", str(tmp_path), "--db", str(TOASTCORE), "census", "--by", "parent", "--limit", "100")
+    assert sum(int(line.split()[1]) for line in lines[1:]) == 2082546
+    assert sum(int(line.split()[0]) for line in lines[1:]) == 127
+
+
+def test_census_by_top_groups_each_object_under_its_outermost_location(tmp_path):
+    db = load(str(TOASTCORE))
+
+    def top(oid):
+        seen = {oid}
+        while int(db.objects[oid].location) in db.objects and int(db.objects[oid].location) not in seen:
+            oid = int(db.objects[oid].location)
+            seen.add(oid)
+        return oid
+
+    want = Counter(top(oid) for oid, o in db.objects.items() if not o.anon)
+    lines = run("--cache-dir", str(tmp_path), "--db", str(TOASTCORE), "census", "--by", "top", "--limit", "200")
+    assert lines[0].endswith(f"in {len(want)} groups by top")
+    assert {int(line.split()[2][1:]): int(line.split()[0]) for line in lines[1:]} == want
+    assert any(n > 1 for n in want.values())  # something is inside something
+
+
+def test_census_since_itself_is_empty(tmp_path):
+    lines = run("--cache-dir", str(tmp_path), "--db", str(TOASTCORE), "census", "--since", str(TOASTCORE))
+    assert lines[0].startswith("0 objects, 0 bytes, in 0 groups by owner")
+
+
+def test_census_needs_the_index():
+    result = CliRunner().invoke(cli.moodb, ["--no-cache", "--db", str(TOASTCORE), "census"])
+    assert result.exit_code == 2
+    assert "drop --no-cache" in result.output
+
+
+def test_grep_verb_and_verbs_without_match():
+    with_pass = set(run("--no-cache", "--db", str(TOASTCORE), "grep", "--verb", "recycle", "-l", r"pass\("))
+    without = set(run("--no-cache", "--db", str(TOASTCORE), "grep", "--verb", "recycle", "-L", r"pass\("))
+    assert with_pass and not with_pass & without
+    every = run("--no-cache", "--db", str(TOASTCORE), "grep", "--verb", "recycle", "-L", "a^")  # matches no line
+    assert set(every) == with_pass | without
+    assert all('"' in line and ":[" in line for line in every)
+
+
+def test_clip_keeps_short_lines_and_cuts_long_ones_around_the_match():
+    import re
+
+    from lambdamoo_db.cli import _clip
+
+    assert _clip("short", 10) == "short"
+    long = "a" * 50 + "#123" + "b" * 50
+    assert _clip(long, 0) == long
+    cut = _clip(long, 20, re.compile("#123"))
+    assert "#123" in cut and cut.startswith("...") and cut.endswith("... [104 chars]")
+    assert _clip(long, 20).startswith("a" * 20 + "...")
+
+
+def test_format_time_takes_any_task_time():
+    from lambdamoo_db.inspection import format_time
+
+    assert format_time(0) == "1970-01-01 00:00:00Z"
+    assert format_time(-86400) == "1969-12-31 00:00:00Z"
+    assert format_time(1792279400) == "2026-10-17 23:23:20Z"
+    assert format_time(9223372036854775807) == "until resumed"
+    assert format_time(9223372036854775806) == "9223372036854775806s"
+    assert format_time(-9223372036854775808) == "-9223372036854775808s"
+    assert format_time(253402300799) == "9999-12-31 23:59:59Z"
+    assert format_time(253402300800) == "253402300800s"
+    assert format_time(None) == "-"
+
+
+def test_slots_missing_by_groups():
+    by_property = run("--no-cache", "--db", str(TOASTCORE), "slots", "--missing-by", "property")
+    assert by_property[0] == "5 slots name a missing object, in 2 groups by property"
+    assert by_property[1].split() == ["4", ".entrances"]
+    by_holder = run("--no-cache", "--db", str(TOASTCORE), "slots", "--missing-by", "holder", "--limit", "1")
+    assert by_holder[0] == "5 slots name a missing object, in 5 groups by holder"
+    assert len(by_holder) == 2

@@ -9,11 +9,13 @@ from itertools import groupby
 from pathlib import Path
 
 import click
+from .database import ObjNum
 from .inspection import (
     BUILTIN_PROPS,
     LookupFailed,
     added_property_definitions,
     added_verb_lines,
+    all_objects,
     all_properties,
     answers_call,
     builtin_value,
@@ -315,14 +317,34 @@ def _slot_label(where: tuple) -> str:
     return ".".join(s for s in where if isinstance(s, str) and s not in ("key", "value"))
 
 
+def _missing_key(db, by: str, number: int, where: tuple) -> str:
+    """The group a slot naming missing object #number falls in, for `slots --missing-by`."""
+    if by == "target":
+        return f"#{number}"
+    head = where[0]
+    if head == "waifs":
+        cls = int(db.waifs[where[1]].waif_class)
+        return f"waifs of class #{cls} {db.name_of(cls) or ''}".rstrip()
+    if by == "property" and isinstance(head, str) and head.startswith(("#", "anon ")):
+        return f"{where[1]}" if str(where[1])[:1] == "." else _slot_label(where)
+    if by == "holder" and isinstance(head, str) and head.startswith("#"):
+        return f"{head} {db.name_of(int(head[1:])) or ''}".rstrip()
+    return _slot_label(where)
+
+
 @moodb.command()
+@click.option("--missing-by", type=click.Choice(["holder", "property", "target"]),
+              help="Instead of the field table, group the slots naming a missing object by the object holding them, "
+                   "the property they are in, or the missing number.")
+@click.option("--limit", default=40, show_default=True, help="Groups to show with --missing-by.")
 @click.pass_context
-def slots(ctx: click.Context) -> None:
+def slots(ctx: click.Context, missing_by: str | None, limit: int) -> None:
     """Count every slot holding an object number, by field.
 
     Columns: slots; how many hold a negative number (#-1 and the like); how many
     name a permanent object that does not exist (recycled or past the end).
-    The fields are those the renumbering walk rewrites.
+    The fields are those the renumbering walk rewrites. Waif slots are grouped
+    by the waif's class.
     """
     from .objnums import remap as remap_numbers
 
@@ -331,18 +353,408 @@ def slots(ctx: click.Context) -> None:
     db = load(ctx.obj["path"])
     permanent = {oid for oid, o in db.objects.items() if not o.anon}
     counts: dict[tuple[str, str], list[int]] = {}
+    missing: Counter[str] = Counter()
 
     def count(kind: str, number: int, where: tuple) -> int:
         row = counts.setdefault((kind, _slot_label(where)), [0, 0, 0])
         row[0] += 1
         row[1] += number < 0
-        row[2] += kind == "object" and number >= 0 and number not in permanent
+        if kind == "object" and number >= 0 and number not in permanent:
+            row[2] += 1
+            if missing_by:
+                missing[_missing_key(db, missing_by, number, where)] += 1
         return number
 
     remap_numbers(db, count)
+    if missing_by:
+        click.echo(f"{sum(missing.values())} slots name a missing object, in {len(missing)} groups by {missing_by}")
+        for key, n in missing.most_common(limit):
+            click.echo(f"{n:>10}  {key}")
+        return
     click.echo(f"{'kind':<7} {'field':<44} {'slots':>10} {'negative':>9} {'missing':>8}")
-    for (kind, label), (total, negative, missing) in sorted(counts.items()):
-        click.echo(f"{kind:<7} {label:<44} {total:>10} {negative:>9} {missing:>8}")
+    for (kind, label), (total, negative, missing_count) in sorted(counts.items()):
+        click.echo(f"{kind:<7} {label:<44} {total:>10} {negative:>9} {missing_count:>8}")
+
+
+def _indexed(ctx: click.Context, path: str) -> LazyDatabase:
+    """``path`` opened through its offset index, built first if there is none."""
+    if ctx.obj["cache"] is None:
+        raise click.UsageError("this command reads the offset index; drop --no-cache")
+    db = open_indexed(path, ctx.obj["cache"])
+    if not isinstance(db, LazyDatabase):
+        db = open_indexed(path, ctx.obj["cache"])  # the first call built the index and parsed the whole dump
+    if not isinstance(db, LazyDatabase):
+        raise click.UsageError(f"{path} is older than format 17 and has no offset index")
+    return db
+
+
+@moodb.command()
+@click.option("--since", "old", type=click.Path(exists=True, dir_okay=False),
+              help="Only objects this older dump does not have (by number).")
+@click.option("--by", "field", type=click.Choice(["owner", "parent", "location", "top", "object"]), default="owner",
+              show_default=True, help="`top` is the outermost location (what a ship or area holds, however deep); "
+                                      "`object` lists single objects, largest first.")
+@click.option("--name", "name_pattern", help="Only objects whose name matches this regex (case-insensitive).")
+@click.option("--limit", default=40, show_default=True, help="Groups to show.")
+@click.pass_context
+def census(ctx: click.Context, old: str | None, field: str, name_pattern: str | None, limit: int) -> None:
+    """Group objects by owner, first parent or location, with their size in the dump.
+
+    Bytes are the object's record (which holds the waifs first written there)
+    plus its verb programs. Each group shows up to three example objects.
+    """
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = _indexed(ctx, ctx.obj["path"])
+    index = db.index
+    skip = set(_indexed(ctx, old).index.records) if old else set()
+    named = re.compile(name_pattern, re.I) if name_pattern else None
+    groups: dict[int, list] = {}
+    heads = list(db.object_heads())
+    where = {o.id: int(o.location) for o in heads}
+
+    def top(oid: int) -> int:
+        seen = {oid}
+        while where.get(oid, -1) in where and where[oid] not in seen:
+            oid = where[oid]
+            seen.add(oid)
+        return oid
+
+    for o in heads:
+        if o.id in skip or (named and not named.search(o.name)):
+            continue
+        start, end, anon = index.records[o.id]
+        size = end - start + sum(e - s for s, e in index.programs.get(o.id, ()))
+        key = {"owner": lambda: int(o.owner), "parent": lambda: int(o.parents[0]) if o.parents else -1,
+               "location": lambda: int(o.location), "top": lambda: top(o.id), "object": lambda: o.id}[field]()
+        row = groups.setdefault(key, [0, 0, []])
+        row[0] += 1
+        row[1] += size
+        if len(row[2]) < 3:
+            row[2].append(f"#{o.id} {o.name!r}")
+    objects, size = sum(r[0] for r in groups.values()), sum(r[1] for r in groups.values())
+    click.echo(f"{objects} objects, {size} bytes, in {len(groups)} groups by {field}"
+               + (f"; only objects {old} does not have" if old else ""))
+    players = {int(p) for p in db.players}
+    for key, (n, b, examples) in sorted(groups.items(), key=lambda kv: -kv[1][1])[:limit]:
+        kind = f"[{_owner_kind(db, key, players)}] " if field == "owner" else ""
+        click.echo(f"{n:>7} {b:>12}  #{key} {kind}{db.name_of(key) or ''}  e.g. {', '.join(examples)}")
+
+
+SET_OPTIONS = ("--owned-by", "--name", "--empty", "--sweep-skip")
+SET_FLAGS = ("--with-contents", "--keep-numbers", "--sweep")
+
+
+def _read_set(path: str | None) -> dict[str, list]:
+    """A removal set kept in a file, one entry per line: a REF, `--owned-by REF`, `--name REGEX` (the rest
+    of the line, spaces included), `--empty REF.NAME`, `--with-contents`, `--keep-numbers`, `--sweep`
+    (also remove every object nothing live reaches once the rest is gone; see `unreachable`) or
+    `--sweep-skip PROP` (a bookkeeping property that keeps nothing alive for the sweep). Blank lines and
+    lines starting with `;` are skipped."""
+    found: dict[str, list] = {"refs": [], **{k: [] for k in SET_OPTIONS + SET_FLAGS}}
+    if path is None:
+        return found
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith(";"):
+            continue
+        word, _, rest = line.partition(" ")
+        if word in SET_FLAGS and not rest:
+            found[word].append(True)
+        elif word in SET_OPTIONS and rest.strip():
+            found[word].append(rest.strip())
+        elif not word.startswith("-") and not rest:
+            found["refs"].append(word)
+        else:
+            raise click.UsageError(f"{path}:{n}: not a set entry: {line!r}")
+    return found
+
+
+def _swept(db, chosen: set[int], with_contents: bool, kept: dict[str, list]) -> set[int]:
+    """With a `--sweep` line: the objects nothing live reaches once ``chosen`` (closed) is gone."""
+    if not kept["--sweep"]:
+        return set()
+    from .liveness import unreachable as find
+    from .removal import plan
+
+    return find(db, kept["--sweep-skip"], plan(db, chosen, with_contents).removed)
+
+
+def _chosen(db, refs, owned_by, names_rx) -> tuple[set[int], dict[str, set[int]]]:
+    """Objects named by REFS, --owned-by (the owner and what it owns) and --name (by regex)."""
+    chosen = {_object(db, r).id for r in refs}
+    for r in owned_by:
+        owner = _object(db, r).id
+        chosen |= {owner} | {oid for oid, o in db.objects.items() if int(o.owner) == owner and not o.anon}
+    by_name = {}
+    for rx in names_rx:
+        pattern = re.compile(rx, re.I)
+        by_name[rx] = {oid for oid, o in db.objects.items() if not o.anon and pattern.search(o.name)}
+        chosen |= by_name[rx]
+    return chosen, by_name
+
+
+@moodb.command()
+@click.argument("refs", nargs=-1)
+@click.option("--owned-by", multiple=True, help="Also remove this object and everything it owns (repeatable).")
+@click.option("--with-contents", is_flag=True, help="Also remove everything located in a removed object, except players.")
+@click.option("--name", "names_rx", multiple=True, metavar="REGEX",
+              help="Also remove every object whose name matches (case-insensitive, repeatable).")
+@click.option("--limit", default=40, show_default=True, help="Inbound references to list (0 = all).")
+@click.option("--field", "fields", multiple=True,
+              help="List only the inbound references in this field, as the counts name it (repeatable).")
+@click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
+              help="Read more of the set from FILE: one REF, --owned-by REF, --name REGEX or --with-contents "
+                   "per line (--empty lines are for rewrite and ignored here); ; starts a comment.")
+@click.pass_context
+def removal(ctx: click.Context, refs: tuple[str, ...], owned_by: tuple[str, ...], with_contents: bool,
+            names_rx: tuple[str, ...], limit: int | None, fields: tuple[str, ...], set_file: str | None) -> None:
+    """What removing objects would leave pointing at nothing.
+
+    The set is closed over descendants (and contents, with --with-contents). Every slot outside the set that names
+    a removed object is listed by field, holder and target; entries in
+    .owned_objects/.lost_souls and in children/contents lists are only
+    counted, since the rewrite drops them. Also lists objects located inside
+    the set that stay, and players in the set.
+    """
+    from .removal import plan
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    kept = _read_set(set_file)
+    with_contents = with_contents or bool(kept["--with-contents"])
+    db = load(ctx.obj["path"])
+    chosen, by_name = _chosen(db, (*refs, *kept["refs"]), (*owned_by, *kept["--owned-by"]),
+                              (*names_rx, *kept["--name"]))
+    swept = _swept(db, chosen, with_contents, kept)
+    chosen |= swept
+    if not chosen:
+        raise click.UsageError("name objects to remove, or --owned-by / --name")
+    p = plan(db, chosen, with_contents)
+    limit = limit or None
+    click.echo(f"remove {len(p.removed)} objects: {len(p.chosen)} chosen, {len(p.descendants)} descendants"
+               + (f", {len(p.contents)} contents" if with_contents else ""))
+    for rx, found in by_name.items():
+        click.echo(f"--name {rx}: {len(found)}: " + ", ".join(label(db, x) for x in sorted(found)[:limit])
+                   + (" ..." if limit and len(found) > limit else ""))
+    if kept["--sweep"]:
+        click.echo(f"--sweep: {len(swept)}: " + ", ".join(label(db, x) for x in sorted(swept)[:limit])
+                   + (" ..." if limit and len(swept) > limit else ""))
+    if p.players:
+        click.echo("players removed: " + ", ".join(label(db, x) for x in sorted(p.players)))
+    click.echo(f"inbound references from outside: {sum(p.inbound.values())} slots")
+    by_field = Counter()
+    for (field, _, _), n in p.inbound.items():
+        by_field[field] += n
+    for field, n in by_field.most_common():
+        click.echo(f"{n:>8}  {field}")
+    by_holder = Counter()
+    for (_, holder, _), n in p.inbound.items():
+        by_holder[holder] += n
+    click.echo(f"by holder ({len(by_holder)}):")
+    for holder, n in by_holder.most_common(limit):
+        name = db.name_of(int(holder[1:])) if holder[:1] == "#" else None
+        click.echo(f"{n:>8}  {holder}" + (f" {moo_string(name)}" if name is not None else ""))
+    listed = [(k, n) for k, n in p.inbound.most_common() if not fields or k[0] in fields]
+    for (field, holder, target), n in listed[:limit]:
+        click.echo(f"    {field}  {holder} -> {label(db, target)}" + (f"  x{n}" if n > 1 else ""))
+    click.echo("dropped by the rewrite: " + (", ".join(f"{f} {n}" for f, n in p.dropped.most_common()) or "nothing"))
+    click.echo(f"staying objects located inside the set: {len(p.stranded)}")
+    for oid, where in sorted(p.stranded.items())[:limit]:
+        click.echo(f"    {label(db, oid)} in #{where}")
+
+
+@moodb.command()
+@click.option("--limit", default=40, show_default=True, help="Places to list (0 = all).")
+@click.pass_context
+def mentions(ctx: click.Context, limit: int) -> None:
+    """Where existing objects' numbers are spelled `#N` inside strings, by property or verb.
+
+    A renumbering rewrites object values and code literals, not text: these strings keep the old numbers.
+    Code that builds keys with tostr(obj) or reads them back with toobj() then meets the wrong object.
+    """
+    from .liveness import mentions as find
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = load(ctx.obj["path"])
+    found = find(db, {oid for oid, o in db.objects.items() if not o.anon})
+    by_place: Counter = Counter()
+    for where in found.values():
+        for w in where:
+            by_place[w] += 1
+    click.echo(f"{len(found)} objects are spelled #N in strings, in {len(by_place)} places")
+    for w, n in by_place.most_common(limit or None):
+        click.echo(f"{n:>8}  {w}")
+
+
+@moodb.command()
+@click.option("--skip", multiple=True, metavar="NAME",
+              help="A property whose values keep nothing alive (bookkeeping); repeatable, case-insensitive.")
+@click.option("--limit", default=40, show_default=True, help="Groups to list (0 = all).")
+@click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
+              help="Treat this removal set (as `removal --set` reads it) as already gone.")
+@click.option("--with-verbs", is_flag=True,
+              help="Also list each unreachable object that has verbs, with their names: a test suite run only "
+                   "by typing `@test #N` is unreachable by design.")
+@click.pass_context
+def unreachable(ctx: click.Context, skip: tuple[str, ...], limit: int, set_file: str | None,
+                with_verbs: bool) -> None:
+    """Objects nothing live reaches, grouped under the outermost unreachable object that holds them.
+
+    Roots: #0 (every $name), players, tasks and other slots no object holds. Followed: every number a
+    reached object holds in properties, verb code, location, contents, parents and waifs. Not followed:
+    children, owners, owned lists, last_move, lost_souls and --skip properties.
+    """
+    from .liveness import mentions
+    from .liveness import unreachable as find
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = load(ctx.obj["path"])
+    removed: set[int] = set()
+    if set_file:
+        from .removal import plan
+
+        kept = _read_set(set_file)
+        chosen, _ = _chosen(db, kept["refs"], kept["--owned-by"], kept["--name"])
+        removed = plan(db, chosen, bool(kept["--with-contents"])).removed
+        skip = (*skip, *kept["--sweep-skip"])
+    gone = find(db, skip, removed)
+    players = {int(p) for p in db.players}
+    owners = Counter(int(db.objects[oid].owner) for oid in gone)
+    spelled = mentions(db, gone, ignore=gone | removed)
+
+    def top(oid: int) -> int:
+        seen = {oid}
+        while int(db.objects[oid].location) in gone and int(db.objects[oid].location) not in seen:
+            oid = int(db.objects[oid].location)
+            seen.add(oid)
+        return oid
+
+    groups: dict[int, list[int]] = {}
+    for oid in sorted(gone):
+        groups.setdefault(top(oid), []).append(oid)
+    click.echo(f"unreachable: {len(gone)} objects in {len(groups)} groups"
+               + (f" beside the {len(removed)} the set removes" if set_file else "")
+               + (f" (skipping {', '.join(skip)})" if skip else ""))
+    for root, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:limit or None]:
+        o = db.objects[root]
+        click.echo(f"{len(members):>7}  {label(db, root)} owner #{int(o.owner)} parent "
+                   f"#{int(o.parents[0]) if o.parents else -1}"
+                   + (f"  e.g. {', '.join(label(db, m) for m in members[1:4])}" if len(members) > 1 else ""))
+    click.echo(f"by owner ({len(owners)}):")
+    for owner, n in owners.most_common(limit or None):
+        kind = ("player" if owner in players else "nothing" if owner == -1
+                else "object" if owner in db.objects else "missing")
+        click.echo(f"{n:>7}  {label(db, owner) if owner in db.objects else f'#{owner}'} [{kind}]")
+    if with_verbs:
+        coded = [oid for oid in sorted(gone) if db.objects[oid].verbs]
+        click.echo(f"with verbs: {len(coded)} objects, {sum(len(db.objects[o].verbs) for o in coded)} verbs")
+        for oid in coded:
+            names = [v.name for v in db.objects[oid].verbs]
+            click.echo(f"    {label(db, oid)} owner #{int(db.objects[oid].owner)}: {len(names)}: "
+                       + ", ".join(names[:8]) + (" ..." if len(names) > 8 else ""))
+    click.echo(f"spelled as #N in a string elsewhere (the sweep cannot follow these): {len(spelled)}")
+    for oid, where in sorted(spelled.items())[:limit or None]:
+        click.echo(f"    {label(db, oid)}  in {', '.join(sorted(where)[:4])}" + (" ..." if len(where) > 4 else ""))
+
+
+@moodb.command()
+@click.argument("out", type=click.Path(dir_okay=False))
+@click.argument("refs", nargs=-1)
+@click.option("--owned-by", multiple=True, help="Also remove this object and everything it owns (repeatable).")
+@click.option("--owner-to", help="Give surviving objects, verbs and properties owned by removed objects to this object.")
+@click.option("--strand-to", help="Move surviving objects located in removed ones here (#-1 for nowhere).")
+@click.option("--with-contents", is_flag=True, help="Also remove everything located in a removed object, except players.")
+@click.option("--name", "names_rx", multiple=True, metavar="REGEX",
+              help="Also remove every object whose name matches (case-insensitive, repeatable).")
+@click.option("--empty", "empties", multiple=True, metavar="REF.NAME",
+              help="Empty this property's value (same type) and clear descendants' own values; repeatable.")
+@click.option("--set", "set_file", type=click.Path(exists=True, dir_okay=False),
+              help="Read more of the set from FILE: one REF, --owned-by REF, --name REGEX, --empty REF.NAME, "
+                   "--with-contents or --keep-numbers per line; ; starts a comment.")
+@click.option("--keep-numbers", is_flag=True,
+              help="Renumber nothing: removed objects become recycled slots and survivors keep their numbers.")
+@click.pass_context
+def rewrite(ctx: click.Context, out: str, refs: tuple[str, ...], owned_by: tuple[str, ...],
+            owner_to: str | None, strand_to: str | None, with_contents: bool, names_rx: tuple[str, ...],
+            empties: tuple[str, ...], set_file: str | None, keep_numbers: bool) -> None:
+    """Write OUT: the dump without the named objects, numbered densely unless --keep-numbers.
+
+    Removes the objects (and their descendants), numbers the rest #0.. in their
+    old order with no recycled slots, and rewrites every reference: values,
+    the object table, verb code literals, tasks. A reference to a removed or
+    missing object becomes a distinct negative number (base - old). Numbers
+    spelled inside strings are NOT rewritten, so dense numbering breaks code
+    that keys data by tostr(obj) and outside URLs that carry object numbers;
+    --keep-numbers avoids that (only references to removed objects change).
+    Writes OUT.map.json (old -> new) and prints what changed. Refuses while
+    anything surviving is owned by, or located in, a removed object, unless
+    --owner-to or --strand-to says where it goes.
+    """
+    from .rewrite import RewriteRefused, empty_property
+    from .rewrite import rewrite as rewrite_db
+    from .writer import Writer
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    if Path(out).resolve() == Path(ctx.obj["path"]).resolve():
+        raise click.UsageError("OUT must not be the dump being read")
+    kept = _read_set(set_file)
+    with_contents = with_contents or bool(kept["--with-contents"])
+    keep_numbers = keep_numbers or bool(kept["--keep-numbers"])
+    empties = (*empties, *kept["--empty"])
+    db = load(ctx.obj["path"])
+    chosen, _ = _chosen(db, (*refs, *kept["refs"]), (*owned_by, *kept["--owned-by"]), (*names_rx, *kept["--name"]))
+    swept = _swept(db, chosen, with_contents, kept)
+    chosen |= swept
+    target = {"owner_to": owner_to, "strand_to": strand_to}
+    resolved = {k: (int(v[1:]) if v.startswith("#-") else _object(db, v).id) if v else None for k, v in target.items()}
+    emptied = []
+    try:
+        for spec in empties:
+            ref, _, name = spec.rpartition(".")
+            if not ref or not name:
+                raise click.UsageError(f"--empty wants REF.NAME, got {spec!r}")
+            emptied.append(f"{spec} {empty_property(db, _object(db, ref).id, name)}")
+        report = rewrite_db(db, chosen, **resolved, with_contents=with_contents, keep_numbers=keep_numbers)
+    except RewriteRefused as e:
+        raise click.ClickException(str(e)) from e
+    with open(out, "w", encoding="latin-1", newline="") as f:
+        Writer(db=db, output_file=f).writeDatabase()
+    Path(out + ".map.json").write_text(json.dumps({"base": report.base, "map": report.renumbered}))
+    p = report.plan
+    click.echo(f"removed {len(p.removed)} objects ({len(p.chosen)} chosen, {len(p.descendants)} descendants, "
+               f"{len(p.contents)} contents); "
+               + (f"numbers kept: {sum(1 for o in db.objects.values() if not o.anon)} objects in "
+                  f"#0..#{db.total_objects - 1}, {len(db.recycled_objects)} recycled slots" if keep_numbers else
+                  f"{db.total_objects} permanent objects now, highest #{db.total_objects - 1}"))
+    click.echo(f"dead numbers: base {report.base}; {sum(report.dead_slots.values())} slots")
+    for field, n in report.dead_slots.most_common():
+        click.echo(f"{n:>10}  {field}")
+    click.echo("dropped: " + (", ".join(f"{k} {n}" for k, n in report.dropped.most_common()) or "nothing"))
+    click.echo("reassigned: " + (", ".join(f"{k} {n}" for k, n in report.reassigned.items()) or "nothing"))
+    click.echo("tasks dropped: " + (", ".join(f"{s} {t}" for s, t in report.tasks_dropped) or "none"))
+    click.echo("emptied (slots changed): " + (", ".join(emptied) or "nothing"))
+    click.echo(f"wrote {out} and {out}.map.json")
+
+
+def _object_kind(db: LazyDatabase, oid: int, players: set[int]) -> str:
+    """What a number names: nothing (negative), a missing object, a player or another object."""
+    if oid < 0:
+        return "nothing"
+    if oid not in db.index.records:
+        return "missing"
+    return "player" if oid in players else "object"
+
+
+def _owner_kind(db: LazyDatabase, oid: int, players: set[int]) -> str:
+    """What an owner is: a player, an object that owns itself, another object, nothing (#-1) or missing."""
+    kind = _object_kind(db, oid, players)
+    if kind == "object" and int(db.read_head(oid).owner) == oid:
+        return "self-owned"
+    return kind
 
 
 @moodb.command()
@@ -378,9 +790,11 @@ def obj(ctx: click.Context, ref: str) -> None:
               help="One line per value: REF's effective values, then every descendant's own (not clear) values.")
 @click.option("--group", is_flag=True,
               help="With -r: one line per distinct name and value, with how many objects hold it and the first five.")
+@click.option("--largest", type=int, metavar="N",
+              help="Only the N stored (not clear) values taking the most bytes in the dump, largest first.")
 @click.pass_context
 def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[str, ...], recursive: bool,
-          group: bool) -> None:
+          group: bool, largest: int | None) -> None:
     """List every property of an object, own and inherited, with effective values."""
     db, names = _db(ctx)
     o = _object(db, ref)
@@ -390,6 +804,20 @@ def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[
     def wanted(name: str) -> bool:
         return not patterns or any(fnmatchcase(name.lower(), g) for g in patterns)
 
+    if largest is not None:
+        from io import StringIO
+
+        from .writer import Writer
+
+        def size(value) -> int:
+            out = StringIO()
+            Writer(db=db, output_file=out).writeValue(value)
+            return len(out.getvalue())
+
+        sized = sorted(((size(v), n, v) for n, v in stored_properties(db, o) if wanted(n)), key=lambda r: -r[0])
+        for nbytes, name, value in sized[:largest]:
+            click.echo(f"{nbytes:>10}  .{name} = {format_value(value, limit or 60)}")
+        return
     if group and not recursive:
         raise click.UsageError("--group needs -r")
     if recursive:
@@ -637,11 +1065,84 @@ def prop(ctx: click.Context, spec: tuple[str, ...], full: bool) -> None:
 
 
 @moodb.command()
+@click.argument("spec")
+@click.pass_context
+def keys(ctx: click.Context, spec: str) -> None:
+    """Group a map property's keys, or a list property's elements, by what they name.
+
+    Object numbers are a player, another object, a missing object (recycled or past
+    the end) or nothing (negative); anything else is grouped by its type. Bytes are
+    the entries' size in the dump (key and value for a map).
+    """
+    from io import StringIO
+
+    from .writer import Writer
+
+    if ctx.obj["path"] is None:
+        raise click.UsageError("no dump given: pass --db DUMP or set MOODB")
+    db = _indexed(ctx, ctx.obj["path"])
+    try:
+        ref, rest = split_ref(spec)
+        if not rest.startswith(".") or len(rest) < 2:
+            raise LookupFailed(f"expected REF.PROP, got {spec!r}")
+        o = resolve_object(db, ref)
+        hit = lookup_property(db, o, rest[1:])
+    except LookupFailed as e:
+        raise click.ClickException(str(e))
+    value = hit.value
+    if isinstance(value, dict):
+        entries, what = list(value.items()), f"map of {len(value)} keys"
+    elif isinstance(value, list):
+        entries, what = [(e, None) for e in value], f"list of {len(value)} elements"
+    else:
+        raise click.ClickException(f"#{o.id}.{hit.name} is neither a map nor a list")
+
+    def size(*values) -> int:
+        out = StringIO()
+        writer = Writer(db=db, output_file=out)
+        for v in values:
+            if v is not None:
+                writer.writeValue(v)
+        return len(out.getvalue())
+
+    players = {int(p) for p in db.players}
+    groups: dict[str, list] = {}
+    for key, entry in entries:
+        kind = _object_kind(db, int(key), players) if isinstance(key, ObjNum) else type(key).__name__.upper()
+        row = groups.setdefault(kind, [0, 0, []])
+        row[0] += 1
+        row[1] += size(key, entry)
+        if len(row[2]) < 3:
+            row[2].append(format_value(key, 40))
+    click.echo(f"#{o.id}.{hit.name}: {what}")
+    for kind, (n, nbytes, examples) in sorted(groups.items(), key=lambda kv: (-kv[1][0], kv[0])):
+        click.echo(f"{kind:<8} {n:>8} {nbytes:>12}  e.g. {', '.join(examples)}")
+
+
+def _clip(text: str, width: int, rx: re.Pattern[str] | None = None) -> str:
+    """``text`` cut to ``width`` characters around the first match of ``rx``; 0 keeps it whole."""
+    if not width or len(text) <= width:
+        return text
+    m = rx.search(text) if rx else None
+    start = max(0, min(m.start() - width // 2, len(text) - width)) if m else 0
+    return ("..." if start else "") + text[start:start + width] + f"... [{len(text)} chars]"
+
+
+WIDTH = click.option("--width", default=400, show_default=True, metavar="N",
+                     help="Cut code lines longer than N characters around the match; 0 prints them whole.")
+
+
+@moodb.command()
 @click.argument("pattern")
 @click.option("-o", "--obj", "objs", multiple=True, help="Only search these objects (repeatable).")
 @click.option("-i", "--ignore-case", is_flag=True)
 @click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
 @click.option("-l", "--verbs-only", is_flag=True, help="Print each matching verb once.")
+@click.option("--verb", "verb_names", multiple=True, metavar="NAME",
+              help="Only verbs NAME would call, by MOO name matching (repeatable).")
+@click.option("-L", "--verbs-without-match", is_flag=True,
+              help="Print each verb with a program and no matching line, once.")
+@WIDTH
 @click.option("-C", "--context", default=0, type=click.IntRange(min=0), metavar="N", help="Show N lines of context around each match.")
 @click.option("--require", multiple=True, metavar="PATTERN", help="Each pattern must match somewhere in the same verb.")
 @click.option("--without", multiple=True, metavar="PATTERN", help="Exclude a whole verb if any of these patterns matches.")
@@ -656,7 +1157,8 @@ def prop(ctx: click.Context, spec: tuple[str, ...], full: bool) -> None:
 @click.pass_context
 def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool, context: int,
          require: tuple[str, ...], without: tuple[str, ...], code_only: bool, owners: tuple[str, ...], wizard_owned: bool,
-         executable: bool, summary: bool, output_format: str, limit: int | None, offset: int) -> None:
+         executable: bool, summary: bool, output_format: str, limit: int | None, offset: int,
+         verb_names: tuple[str, ...], verbs_without_match: bool, width: int) -> None:
     """Search verb code (Python regex): #OBJ:[index] name:LINE: text.
 
     Whole-verb filters find co-occurring patterns; they do not prove control
@@ -679,37 +1181,42 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
     excluded = [compile_pattern(value, "--without") for value in without]
     db, names = _db(ctx)
     selected = [_object(db, r) for r in objs] or None
+    def wanted(v) -> bool:
+        return not verb_names or any(verbcasecmp(v.name, name) for name in verb_names)
+
     owner_ids = {_object(db, r).id for r in owners} if owners else None
-    matches = grep_verbs(db, rx, selected, require=required, exclude=excluded, code_only=code_only,
+    matches = grep_verbs(db, re.compile("^") if verbs_without_match else rx, selected,
+                         require=required, exclude=[*excluded, rx] if verbs_without_match else excluded, code_only=code_only,
                          owners=owner_ids, wizard_owned=wizard_owned, executable=executable)
-    by_verb = groupby(matches, key=lambda h: (h.obj.id, h.index))
+    by_verb = groupby((h for h in matches if wanted(h.verb)), key=lambda h: (h.obj.id, h.index))
     counts = {"matched_lines": 0, "matched_verbs": 0, "matched_objects": 0}
     object_counts, owner_counts = {}, {}
     records = []
     for n_group, (_, group) in enumerate(by_verb):
         hits = list(group)
         o, idx, v = hits[0].obj, hits[0].index, hits[0].verb
-        counts["matched_lines"] += len(hits)
+        line_count = 0 if verbs_without_match else len(hits)
+        counts["matched_lines"] += line_count
         counts["matched_verbs"] += 1
         for groups, key in ((object_counts, o.id), (owner_counts, int(v.owner))):
             entry = groups.setdefault(key, {"verbs": 0, "lines": 0})
             entry["verbs"] += 1
-            entry["lines"] += len(hits)
+            entry["lines"] += line_count
         if summary or n_group < offset or (limit is not None and n_group >= offset + limit):
             continue
         if output_format == "json":
             record = {"object": o.id, "index": idx, "names": v.name, "owner": int(v.owner),
                       "perms": verb_perms(v), "args": verb_args(v)}
-            if not verbs_only:
+            if not (verbs_only or verbs_without_match):
                 record["lines"] = [{"line": h.lineno, "text": h.line} for h in hits]
             records.append(record)
             continue
-        if verbs_only:
+        if verbs_only or verbs_without_match:
             click.echo(f"{label(db, o.id, names)}:[{idx}] {moo_string(v.name)}")
             continue
         if not context:
             for h in hits:
-                click.echo(f"#{o.id}:[{idx}] {_alias(v)}:{h.lineno}: {h.line.strip()}")
+                click.echo(f"#{o.id}:[{idx}] {_alias(v)}:{h.lineno}: {_clip(h.line.strip(), width, rx)}")
             continue
         if n_group:
             click.echo("--")
@@ -720,7 +1227,7 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
             if prev is not None and n != prev + 1:
                 click.echo("--")
             sep = ":" if n in matched else "-"
-            click.echo(f"#{o.id}:[{idx}] {_alias(v)}{sep}{n}{sep} {code_lines[n - 1].strip()}")
+            click.echo(f"#{o.id}:[{idx}] {_alias(v)}{sep}{n}{sep} {_clip(code_lines[n - 1].strip(), width, rx)}")
     counts["matched_objects"] = len(object_counts)
     if summary:
         data = {**counts,
@@ -922,8 +1429,11 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
 @moodb.command()
 @click.argument("ref", nargs=-1, required=True)
 @click.option("--code", "code_only", is_flag=True, help="Only verb code naming it; leave out property values holding it.")
+@click.option("--skip", "skipped", multiple=True, metavar="NAME",
+              help="Leave out references held in properties with this name (case-insensitive, repeatable).")
+@WIDTH
 @click.pass_context
-def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool) -> None:
+def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool, skipped: tuple[str, ...], width: int) -> None:
     """Find references to an object: property values holding it, and verb code naming #N or its $name.
 
     Several REFs are answered in one run, each under an `== REF` line.
@@ -933,10 +1443,14 @@ def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool) -> None:
     for one, target in zip(ref, targets):
         if len(ref) > 1:
             click.echo(f"== {one}")
+        number = re.compile(rf"#{target.id}(?!\d)")
+        skip = re.compile(r"\.(" + "|".join(re.escape(s) for s in skipped) + r")(?=[\[.]|$)", re.I) if skipped else None
         for r in find_references(db, target, names):
             if code_only and not r.where.startswith(":["):
                 continue
-            click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {r.text}" if r.text else ""))
+            if skip and skip.match(r.where):
+                continue
+            click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {_clip(r.text, width, number)}" if r.text else ""))
 
 
 @moodb.command()

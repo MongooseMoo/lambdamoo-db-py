@@ -13,7 +13,7 @@ import difflib
 import hashlib
 import re
 from collections import Counter, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Sequence
 
 import attrs
@@ -876,16 +876,25 @@ def frame_text(a: Activation) -> str:
     return f"#{a.vloc}:{a.verb} (this #{a.this}, player #{a.player})"
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # suspend() with no timeout: the server stores INTNUM_MAX (toaststunt tasks.cc bf_suspend).
 INDEFINITE_SUSPEND = 2**63 - 1
 
 
 def format_time(seconds: int | None) -> str:
+    """UTC time of Unix ``seconds``; raw seconds when no calendar date holds them.
+
+    Not datetime.fromtimestamp: on Windows it refuses negative and far times,
+    which a task suspended without a deadline can carry.
+    """
     if seconds is None:
         return "-"
     if seconds == INDEFINITE_SUSPEND:
         return "until resumed"
-    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    try:
+        return (_EPOCH + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%SZ")
+    except OverflowError:
+        return f"{seconds}s"
 
 
 # --------------------------------------------------------------------------
