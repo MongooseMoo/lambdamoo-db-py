@@ -849,14 +849,27 @@ class _SnapshotComparison:
         """Encode complete evidence for the selected stored-field scope only."""
         selected = self.sections if selected is None else set(selected)
 
+        # A bare anonymous lifecycle record is itself heap evidence, just as
+        # an anonymous node inside a graph table is. Heap owns all its fields.
+        heap_root = isinstance(value, MooObject) and value.anon and 'heap' in selected
+
+        def include_field(record, field):
+            if type(record) is MooObject:
+                section = FIELD_COVERAGE[MooObject][field]
+                return section == 'identity' or section in selected
+            return type(record) is not Verb or field != 'object'
+
+        if 'heap' not in selected:
+            return encode_value(value, database, field_filter=include_field, include_heap=False)
+
+        # Heap-selected lifecycle evidence historically includes nodes reached
+        # through omitted fields too. Preserve that graph before restricting
+        # visible record fields; preselection would change the reported nodes.
         def restrict(encoded, heap_body=False):
             if not isinstance(encoded, dict):
                 return encoded
             if encoded.get('type') == 'graph':
-                root = restrict(encoded['root'], heap_body)
-                if 'heap' not in selected:
-                    return root
-                return {'type': 'graph', 'root': root,
+                return {'type': 'graph', 'root': restrict(encoded['root'], heap_body),
                         'nodes': [{**node, 'value': restrict(node['value'], True)} for node in encoded['nodes']]}
             if encoded.get('type') == 'record' and encoded.get('record_type') == 'MooObject':
                 fields = {}
@@ -874,9 +887,7 @@ class _SnapshotComparison:
                            else restrict(item, heap_body) if isinstance(item, dict) else item
                     for field, item in encoded.items()}
 
-        # A bare anonymous lifecycle record is itself heap evidence, just as
-        # an anonymous node inside a graph table is. Heap owns all its fields.
-        return restrict(encode_value(value, database), isinstance(value, MooObject) and value.anon and 'heap' in selected)
+        return restrict(encode_value(value, database), heap_root)
 
     def emit(self, entity, category, section, old_path, new_path, old, new, kind='changed', definite=True, details=None, applicable=None, evidence_sections=None):
         applicable = applicable or (section,)

@@ -14,7 +14,7 @@ import hashlib
 import re
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 import attrs
 
@@ -355,15 +355,71 @@ class GrepHit:
     line: str
 
 
-def grep_verbs(db: MooDatabase, pattern: re.Pattern[str], objs: list[MooObject] | None = None) -> Iterator[GrepHit]:
-    """Yield a hit for every verb code line matching pattern."""
+def mask_moo_strings(lines: list[str]) -> list[str]:
+    """Mask string literals (including MOO's comment statements), preserving positions.
+
+    This is lexical filtering, not a parser or proof that a branch executes.
+    Escapes consume the next character inside strings. State crosses lines so
+    unusual stored source cannot accidentally expose a string's contents.
+    """
+    quoted = escaped = False
+    result = []
+    for line in lines:
+        masked = []
+        for char in line:
+            if quoted:
+                masked.append(' ')
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+            elif char == '"':
+                masked.append(' ')
+                quoted = True
+            else:
+                masked.append(char)
+        result.append(''.join(masked))
+        escaped = False  # physical line boundary is not an escaped quote
+    return result
+
+
+def grep_verbs(db: MooDatabase, pattern: re.Pattern[str], objs: list[MooObject] | None = None, *,
+               require: Sequence[re.Pattern[str]] = (), exclude: Sequence[re.Pattern[str]] = (),
+               code_only: bool = False, owners: set[int] | None = None,
+               wizard_owned: bool = False, executable: bool = False) -> Iterator[GrepHit]:
+    """Yield matching source lines, with optional whole-verb and metadata filters.
+
+    Every require pattern must match some line; any exclude match omits the
+    whole verb. Returned evidence is always original source, with 1-based
+    line numbers. Owners refer to verb owners, not the containing object's
+    owner. Missing owners never satisfy wizard_owned.
+    """
     if objs is None:
         objs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+    wizard_ids = {o.id for o in object_heads(db) if o.flags & ObjectFlags.WIZARD} if wizard_owned else set()
+    seen = set()
     for o in objs:
+        if o.id in seen:
+            continue
+        seen.add(o.id)
         for idx, v in enumerate(o.verbs):
-            for n, line in enumerate(v.code or [], 1):
+            if owners is not None and int(v.owner) not in owners:
+                continue
+            if wizard_owned and int(v.owner) not in wizard_ids:
+                continue
+            if executable and not v.perms & VERB_EXEC:
+                continue
+            original = v.code or []
+            lines = mask_moo_strings(original) if code_only else original
+            if any(not any(rx.search(line) for line in lines) for rx in require):
+                continue
+            if any(rx.search(line) for rx in exclude for line in lines):
+                continue
+            for n, line in enumerate(lines, 1):
                 if pattern.search(line):
-                    yield GrepHit(o, idx, v, n, line)
+                    yield GrepHit(o, idx, v, n, original[n - 1])
 
 
 def _verb_keys(obj: MooObject) -> dict[tuple[str, str, int], tuple[int, Verb]]:
@@ -635,6 +691,96 @@ def find_references(db: MooDatabase, target: MooObject, names: dict[int, str]) -
         yield Reference(hit.obj, f":[{hit.index}] {hit.verb.name.split(' ')[0]}:{hit.lineno}", hit.line.strip())
 
 
+@attrs.frozen
+class Cluster:
+    root: MooObject
+    members: list[MooObject]  # the root, then everything inside it, depth-first
+    parents: Counter[int]  # parent -> how many members have it
+    with_verbs: list[MooObject]  # members that define verbs
+    definitions: Counter[str]  # property name -> how many members define it
+    outside_children: list[tuple[MooObject, MooObject]]  # (member, its child that is not a member)
+    players: list[MooObject]
+
+
+@attrs.frozen
+class InboundReference:
+    member: int
+    holder: MooObject  # an object outside every cluster
+    where: str  # ".prop[2]<waif #1641>.dest" or ":[3] verbname:12"
+    text: str  # the code line, or ""
+
+
+_OBJECT_NUMBER = re.compile(r"(?<![\w#$-])#(\d+)(?![0-9])")
+
+
+def clusters(db: MooDatabase, roots: list[MooObject]) -> tuple[list[Cluster], list[InboundReference]]:
+    """Each root with everything inside it, what those objects define, and what outside them refers to them.
+
+    "Outside" means outside every cluster asked for, so clusters that refer to
+    each other can be judged together. Inbound references are property values
+    holding a member's number (through lists, maps and waif bodies) and verb
+    code naming ``#N``. A member's ``$name`` shows as #0's property holding it.
+    """
+    found = []
+    union: set[int] = set()
+    for root in roots:
+        members = [root, *descendants(db, root, "contents")]
+        ids = {m.id for m in members}
+        union |= ids
+        found.append(Cluster(
+            root,
+            members,
+            Counter(int(p) for m in members for p in m.parents),
+            [m for m in members if m.verbs],
+            Counter(p.propertyName for m in members for p in own_properties(m)),
+            [(m, db.objects[int(c)]) for m in members for c in m.children if int(c) not in ids and int(c) in db.objects],
+            [m for m in members if m.flags & ObjectFlags.USER],
+        ))
+    inbound: list[InboundReference] = []
+
+    def walk(value: Any, where: str, open_waifs: frozenset[int]) -> Iterator[tuple[int, str]]:
+        if isinstance(value, ObjNum):
+            if int(value) in union:
+                yield int(value), where
+        elif isinstance(value, list):
+            for i, item in enumerate(value, 1):
+                yield from walk(item, f"{where}[{i}]", open_waifs)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from walk(key, f"{where}.keys[{_format(key)}]", open_waifs)
+                yield from walk(item, f"{where}[{_format(key)}]", open_waifs)
+        elif isinstance(value, WaifReference):
+            waif = db.waifs.get(value.index)
+            if waif is None or value.index in open_waifs:
+                return
+            names = waif_slot_names(db, int(waif.waif_class))
+            for slot, item in waif.props:
+                name = names[slot] if slot < len(names) else f"slot{slot}"
+                yield from walk(item, f"{where}<waif #{int(waif.waif_class)}>.{name}", open_waifs | {value.index})
+
+    for obj in db.objects.values():
+        if obj.id in union:
+            continue
+        names = [p.propertyName for a in db.ancestors(obj) for p in own_properties(a)]
+        for index, prop in enumerate(obj.properties):
+            if prop.value is CLEAR:
+                continue
+            name = names[index] if index < len(names) else f"slot{index}"
+            for member, where in walk(prop.value, f".{name}", frozenset()):
+                inbound.append(InboundReference(member, obj, where, ""))
+    programs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+    for o in programs:
+        if o.id in union:
+            continue
+        for idx, v in enumerate(o.verbs):
+            original = v.code or []
+            # String literals, comments included, are masked: "Last modified … (#4913@Mongoose)" names no object.
+            for n, line in enumerate(mask_moo_strings(original), 1):
+                for number in {int(m) for m in _OBJECT_NUMBER.findall(line)} & union:
+                    inbound.append(InboundReference(number, o, f":[{idx}] {v.name.split(' ')[0]}:{n}", original[n - 1].strip()))
+    return found, inbound
+
+
 # --------------------------------------------------------------------------
 # Stored values
 
@@ -731,8 +877,8 @@ def frame_text(a: Activation) -> str:
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-_DATETIME_SECONDS = ((datetime.min.replace(tzinfo=timezone.utc) - _EPOCH).total_seconds(),
-                     (datetime.max.replace(tzinfo=timezone.utc) - _EPOCH).total_seconds())
+# suspend() with no timeout: the server stores INTNUM_MAX (toaststunt tasks.cc bf_suspend).
+INDEFINITE_SUSPEND = 2**63 - 1
 
 
 def format_time(seconds: int | None) -> str:
@@ -743,9 +889,12 @@ def format_time(seconds: int | None) -> str:
     """
     if seconds is None:
         return "-"
-    if not _DATETIME_SECONDS[0] <= seconds <= _DATETIME_SECONDS[1]:
+    if seconds == INDEFINITE_SUSPEND:
+        return "until resumed"
+    try:
+        return (_EPOCH + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%SZ")
+    except OverflowError:
         return f"{seconds}s"
-    return (_EPOCH + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%SZ")
 
 
 # --------------------------------------------------------------------------

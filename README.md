@@ -87,6 +87,13 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 
 Every command exits 1 with a message when a reference does not resolve.
 
+`code --raw REF:VERB` prints one complete program's source lines, including
+blank lines and editor stamps, without the display header or `.` terminator.
+Use it to export an editor buffer or an expected-old-source file. It requires
+one verb selector and cannot combine with `-n` or `--fingerprint`. An empty
+program prints nothing; an absent program is an error. This is text output
+through the console's encoding, not a byte-preserving dump export.
+
 `code --fingerprint SPEC...` returns a JSON array containing each resolved
 defining object, 0-based `index`, 1-based `native_slot`, program presence,
 line count, SHA256 and recognized editor stamp date in UTC. It prints no
@@ -131,6 +138,46 @@ recipient hierarchy. Discovery prints names and numbers only. Reading is an
 explicit offline data inspection: possession of a dump bypasses live mailbox
 permissions. Select only the mail relevant to the task; message contents and
 names can be private. JSON dates are original Unix timestamps; text uses UTC.
+
+### Reading a live MOO over telnet
+
+```sh
+moodb remote census lambda.jsonl --host lambda.moo.mud.org --port 8888 \
+    --user Rindalin --password-file ~/.config/lambdamoo/rindalin
+moodb remote rank lambda.jsonl --fertile --top 100      # generics their authors invite children of
+moodb remote rank lambda.jsonl --name sittable           # name contains, any case
+moodb remote rank lambda.jsonl --owner 2 --format json
+```
+
+```sh
+moodb remote read lambda-records --census lambda.jsonl --top 200 --fertile \
+    --host lambda.moo.mud.org --port 8888 --user Rindalin --password-file ~/.config/lambdamoo/rindalin
+moodb remote build lambda-records lambda.db       # a v17 dump every moodb command reads
+moodb --db mongoose.db match lambda.db            # which of lambda.db's objects we already have
+moodb --db mongoose.db match lambda.db '#1234' --verbs
+```
+
+`remote census` connects one character (it needs the programmer bit) and walks
+object numbers in blocks with one eval each, pausing between evals. Each valid
+object becomes one JSON line: name, owner, parent, the `r` and `f` flags,
+whether it is a player, verb and readable-verb counts, property count and
+child count. A count of -1 means the object is unreadable to that character.
+Every eval ends with the number of rows the server sent, and a mismatch (for
+example lines lost to the server's output buffer) stops the run. Rerunning
+continues after the last finished block. The password is read from a file and
+never printed. `remote rank` lists objects with readable verbs, fertile first,
+then by readable verbs, then by children; players are left out unless
+`--players` is given.
+
+`remote read` saves each named and top-ranked object whole (verbs with code,
+property values, inherited slots), plus its ancestors and `#0`, as one JSON
+file; files already there are not read again. `remote build` writes them as a
+dump: numbers not read are recycled slots, a value the character could not read
+is the string `<<moodb remote: value unreadable to the reading character>>`,
+and an object whose own or an ancestor's property names were unreadable is left
+out and listed. `match` compares verb code after removing indentation, blank
+lines and "Last modified" footers: exact matches anywhere, or same-named verbs
+sharing at least `--threshold` of their lines.
 
 ### Reading relationships sideways
 
@@ -331,6 +378,38 @@ are not necessarily corruption: multiple inheritance can share descendants.
 
 ### Comparing verb source
 
+For repeatable source audits, `grep` can filter whole verbs and their metadata:
+
+```sh
+moodb grep '\.wizard' --require '\.owner' --without '\$perm_utils\s*:' --code-only --summary
+moodb grep '\.wizard' --require '\.owner' --code-only --wizard-owned --executable -l --limit 30
+moodb grep 'property_info\(' --require 'return' --owner '#2' --format json --limit 20 --offset 20
+moodb batch 'grep ".wizard" -F --code-only --summary' 'grep "caller_perms()" -F --code-only --summary'
+```
+
+Every `--require PATTERN` must match somewhere in the same verb; any
+`--without PATTERN` match excludes that entire verb. Patterns still operate on
+individual lines. `-F` and `-i` apply to all patterns. `--code-only` masks string
+literals, including MOO comment statements and editor stamps, while keeping
+original line numbers and source in the returned evidence. It also masks literal
+arguments and dynamic names: it is lexical filtering, not control-flow analysis
+or an authorization verdict. Backtick expressions remain searchable code.
+
+`--owner REF` selects verb ownership, which can differ from object ownership;
+repeat it to allow several owners. `--wizard-owned` checks the verb owner's
+stored wizard flag; a missing owner does not qualify. `--executable` requires
+the x bit. These filters describe this checkpoint, not the live task's authority.
+
+`--summary` omits names/source and counts matching lines and verbs by object and
+verb owner. `--format json` returns the same counts, or, without `--summary`,
+matching verb metadata and exact line evidence. Combine JSON with `-l` to omit
+source. `--limit N` and `--offset N` page by matching verb, while scanning and
+counting all matches; JSON exposes `next_offset`, `returned_verbs` and
+`truncated`. Zero limit counts without returning any verbs. Counts are matching
+source lines, not individual regex occurrences. Summary mode cannot be paged
+or combined with `-l`/context; JSON cannot include context. Ordinary unpaged text
+output retains its existing format. No-match queries succeed with zero counts.
+
 ```sh
 moodb --db new.db added old.db
 moodb --db new.db added old.db 'notify\('
@@ -440,10 +519,10 @@ fails, with that query's error and exit status.
 
 ### Speed and the index
 
-The first query on a v17 dump parses all of it once (about 25 s for a 94 MB
-dump) and saves an index: the byte offset of every object record and verb
-program, and every object's name. The index is about 1 MB. Later queries read
-only the records they need from the dump itself:
+The first query on a v17 dump parses all of it once and saves an index: the
+byte offset of every object record and verb program, every object's name,
+and verb counts. Later queries read only the records they need from the dump
+itself:
 
 - `obj`, `props`, `verbs`, `code`, `prop`, `children`, `contents`, `players`,
   `tasks` and `find TEXT` read a few records, or none.
@@ -451,8 +530,11 @@ only the records they need from the dump itself:
 - `find --verb` reads every object's verb definitions and `find --prop` the
   names of the properties each object defines; neither parses a property
   value or verb code.
-- `info`, `refs` and `values` look at every object, so they parse the whole
-  dump each time.
+- `info` uses indexed object and verb counts, reads the header for tasks, and
+  reads object #0 and its dependencies for `$names`; it does not parse every
+  object on a cached query. Empty programs are still excluded from "with code".
+- `refs` and `values` look at every object, so they parse the whole dump each
+  time.
 
 The index lives under `lambdamoo-db` in `$XDG_CACHE_HOME`, `%LOCALAPPDATA%` or
 `~/.cache`. Change that with `--cache-dir`. `--no-cache` parses the whole dump

@@ -19,6 +19,7 @@ from .inspection import (
     all_properties,
     answers_call,
     builtin_value,
+    clusters,
     code_fingerprint,
     defined_property_names,
     descendants,
@@ -45,6 +46,8 @@ from .inspection import (
     tasks as list_tasks,
     tree_summary,
     value_holders,
+    verb_args,
+    verb_perms,
     verb_summary,
     verbcasecmp,
 )
@@ -156,24 +159,34 @@ def _db(ctx: click.Context):
 
 @moodb.command()
 @click.argument("query", nargs=-1)
+@click.option("-k", "--keep-going", is_flag=True, help="Report a failed query as `error: …` and go on; exit 1 at the end.")
 @click.pass_context
-def batch(ctx: click.Context, query: tuple[str, ...]) -> None:
+def batch(ctx: click.Context, query: tuple[str, ...], keep_going: bool) -> None:
     """Answer several queries in one run: `batch 'obj 842' 'code 842:0 842:1' 'prop 842.todos'`.
 
     Each QUERY is one moodb command with its arguments, quoted as in a POSIX
     shell. With no QUERY, queries are read from standard input, one per line.
     Each answer follows a `=== QUERY` line. The run stops at the first query
-    that fails.
+    that fails, unless --keep-going.
     """
     queries = query or tuple(line.strip() for line in iter(sys.stdin.readline, "") if line.strip())
+    failed = 0
     for q in queries:
         name, *arguments = shlex.split(q)
         command = moodb.get_command(ctx, name)
         if command is None:
             raise click.UsageError(f"no such command {name!r} in {q!r}")
         click.echo(f"=== {q}")
-        with command.make_context(name, arguments, parent=ctx) as sub:
-            command.invoke(sub)
+        try:
+            with command.make_context(name, arguments, parent=ctx) as sub:
+                command.invoke(sub)
+        except click.ClickException as e:
+            if not keep_going:
+                raise
+            click.echo(f"error: {e.format_message()}")
+            failed += 1
+    if failed:
+        ctx.exit(1)
 
 
 def _object(db, ref: str):
@@ -220,13 +233,18 @@ def _echo_existing_summary(continuity: dict[int, str], identity: str) -> None:
 def info(ctx: click.Context) -> None:
     """Summarise the dump: format, object, verb, player and task counts."""
     db, names = _db(ctx)
-    objs = list(db.objects.values())
-    anon = sum(1 for o in objs if o.anon)
-    verbs = [v for o in objs for v in o.verbs]
+    if isinstance(db, LazyDatabase):
+        anon = sum(anonymous for _, _, anonymous in db.index.records.values())
+        verbs = db.index.verb_definitions
+        with_code = db.index.nonempty_programs
+    else:
+        anon = sum(1 for o in db.objects.values() if o.anon)
+        verbs = sum(len(o.verbs) for o in db.objects.values())
+        with_code = sum(bool(v.code) for o in db.objects.values() for v in o.verbs)
     click.echo(f"dump      {ctx.obj['path']}")
     click.echo(f"format    {db.versionstring.strip()}")
-    click.echo(f"objects   {len(objs) - anon} (+{anon} anonymous), highest #{max(db.objects, default=-1)}, {len(db.recycled_objects)} recycled")
-    click.echo(f"verbs     {len(verbs)} ({sum(1 for v in verbs if v.code)} with code)")
+    click.echo(f"objects   {len(db.objects) - anon} (+{anon} anonymous), highest #{max(db.objects, default=-1)}, {len(db.recycled_objects)} recycled")
+    click.echo(f"verbs     {verbs} ({with_code} with code)")
     click.echo(f"players   {len(db.players)}")
     click.echo(f"$names    {len(names)}")
     click.echo(f"tasks     {len(db.queuedTasks)} queued, {len(db.suspendedTasks)} suspended, {len(db.interruptedTasks)} interrupted")
@@ -843,6 +861,58 @@ def verbs(ctx: click.Context, ref: str, inherited: bool) -> None:
             click.echo(f"#{a.id}:[{idx}] {verb_summary(v)}")
 
 
+def _leading_comments(code) -> list[str]:
+    """The string-statement comments a program starts with, unquoted."""
+    found = []
+    for line in code or []:
+        match = re.fullmatch(r'\s*"((?:[^"\\]|\\.)*)";\s*', line)
+        if not match:
+            break
+        found.append(re.sub(r"\\(.)", r"\1", match[1]))
+    return found
+
+
+@moodb.command()
+@click.argument("refs", nargs=-1, required=True)
+@click.option("-i", "--inherited", is_flag=True, help="Also list commands of every ancestor.")
+@click.option("--lines", type=click.IntRange(min=0), default=3, show_default=True,
+              help="How many of each command's opening comment lines to show.")
+@click.option("--brief", is_flag=True, help="One line per object: its name and each command's first name.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.pass_context
+def commands(ctx: click.Context, refs: tuple[str, ...], inherited: bool, lines: int, brief: bool, fmt: str) -> None:
+    """What players can type at each object: verbs other than `this none this`, with their opening comments."""
+    db, names = _db(ctx)
+    records = []
+    for ref in refs:
+        o = _object(db, ref)
+        chain = db.ancestors(o) if inherited else [o]
+        record = {"object": o.id, "name": o.name, "parents": [a.id for a in db.ancestors(o)[1:]], "commands": []}
+        for a in chain:
+            for idx, v in enumerate(a.verbs):
+                args = verb_args(v)
+                if args == "this none this":
+                    continue
+                record["commands"].append({"object": a.id, "index": idx, "names": v.name, "args": args,
+                                           "comments": _leading_comments(v.code)[:lines]})
+        records.append(record)
+    if fmt == "json":
+        click.echo(json.dumps(records, ensure_ascii=True))
+        return
+    if brief:
+        for record in records:
+            names = " ".join(c["names"].split()[0] for c in record["commands"] if c["names"].split())
+            click.echo(f"#{record['object']} {record['name']}: {names}")
+        return
+    for record in records:
+        chain = " > ".join(f"#{n} {db.name_of(n)}" for n in record["parents"])
+        click.echo(f"== #{record['object']} {record['name']}" + (f"  (under {chain})" if chain else ""))
+        for c in record["commands"]:
+            click.echo(f"  #{c['object']}:[{c['index']}] \"{c['names']}\"  {c['args']}")
+            for comment in c["comments"]:
+                click.echo(f"      {comment}")
+
+
 def _print_program(db, names, o, idx: int, v, line_numbers: bool) -> None:
     click.echo(f"@program {label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
     if v.code is None:
@@ -856,8 +926,9 @@ def _print_program(db, names, o, idx: int, v, line_numbers: bool) -> None:
 @click.argument("spec", nargs=-1, required=True)
 @click.option("-n", "--line-numbers", is_flag=True, help="Number the code lines.")
 @click.option("--fingerprint", is_flag=True, help="Print JSON hashes, line counts and recognized UTC stamp dates, without source text.")
+@click.option("--raw", is_flag=True, help="Print exactly one REF:VERB program's lines, without a header or terminator.")
 @click.pass_context
-def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerprint: bool) -> None:
+def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerprint: bool, raw: bool) -> None:
     """Print verb code: `code '$httpd:GET' 852:12`. A bare REF prints every verb on it.
 
     Verbs are found on the object or its ancestors; the header names the
@@ -865,11 +936,18 @@ def code(ctx: click.Context, spec: tuple[str, ...], line_numbers: bool, fingerpr
     """
     if fingerprint and line_numbers:
         raise click.UsageError("--fingerprint cannot be combined with --line-numbers")
+    if raw and (fingerprint or line_numbers or len(spec) != 1 or ':' not in spec[0]):
+        raise click.UsageError("--raw requires exactly one REF:VERB and cannot be combined with --fingerprint or --line-numbers")
     db, names = _db(ctx)
     fingerprints = []
 
     def emit(o, idx, v):
-        if fingerprint:
+        if raw:
+            if v.code is None:
+                raise click.ClickException("verb has no program")
+            for line in v.code:
+                click.echo(line)
+        elif fingerprint:
             fingerprints.append({"object": o.id, "index": idx, "native_slot": idx + 1,
                                  **code_fingerprint(v)})
         else:
@@ -1060,39 +1138,80 @@ WIDTH = click.option("--width", default=400, show_default=True, metavar="N",
 @click.option("-i", "--ignore-case", is_flag=True)
 @click.option("-F", "--fixed-strings", is_flag=True, help="PATTERN is a literal string.")
 @click.option("-l", "--verbs-only", is_flag=True, help="Print each matching verb once.")
-@click.option("-C", "--context", default=0, metavar="N", help="Show N lines of context around each match.")
 @click.option("--verb", "verb_names", multiple=True, metavar="NAME",
               help="Only verbs NAME would call, by MOO name matching (repeatable).")
 @click.option("-L", "--verbs-without-match", is_flag=True,
               help="Print each verb with a program and no matching line, once.")
 @WIDTH
+@click.option("-C", "--context", default=0, type=click.IntRange(min=0), metavar="N", help="Show N lines of context around each match.")
+@click.option("--require", multiple=True, metavar="PATTERN", help="Each pattern must match somewhere in the same verb.")
+@click.option("--without", multiple=True, metavar="PATTERN", help="Exclude a whole verb if any of these patterns matches.")
+@click.option("--code-only", is_flag=True, help="Match outside string literals, including MOO comment statements.")
+@click.option("--owner", "owners", multiple=True, metavar="REF", help="Only verbs owned by REF (repeatable).")
+@click.option("--wizard-owned", is_flag=True, help="Only verbs whose owner has the wizard flag in this dump.")
+@click.option("--executable", is_flag=True, help="Only verbs with the x permission.")
+@click.option("--summary", is_flag=True, help="Count matching lines/verbs by object and owner; omit source and names.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.option("--limit", type=click.IntRange(min=0), default=None, help="Display at most N matching verbs; scan and count all.")
+@click.option("--offset", type=click.IntRange(min=0), default=0, help="Skip N matching verbs in the display.")
 @click.pass_context
-def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool,
-         context: int, verb_names: tuple[str, ...], verbs_without_match: bool, width: int) -> None:
-    """Search verb code (Python regex): #OBJ:[index] name:LINE: text."""
+def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: bool, fixed_strings: bool, verbs_only: bool, context: int,
+         require: tuple[str, ...], without: tuple[str, ...], code_only: bool, owners: tuple[str, ...], wizard_owned: bool,
+         executable: bool, summary: bool, output_format: str, limit: int | None, offset: int,
+         verb_names: tuple[str, ...], verbs_without_match: bool, width: int) -> None:
+    """Search verb code (Python regex): #OBJ:[index] name:LINE: text.
+
+    Whole-verb filters find co-occurring patterns; they do not prove control
+    flow or authorization. --code-only masks all strings, so dynamic names
+    and literal arguments cannot match. -F and -i apply to every pattern.
+    """
+    if context and output_format == "json":
+        raise click.UsageError("--context cannot be combined with --format json")
+    if summary and (context or verbs_only or limit is not None or offset):
+        raise click.UsageError("--summary cannot be combined with --context, --verbs-only, --limit or --offset")
+
+    def compile_pattern(value, option):
+        try:
+            return re.compile(re.escape(value) if fixed_strings else value, re.IGNORECASE if ignore_case else 0)
+        except re.error as e:
+            raise click.BadParameter(str(e), param_hint=option)
+
+    rx = compile_pattern(pattern, "PATTERN")
+    required = [compile_pattern(value, "--require") for value in require]
+    excluded = [compile_pattern(value, "--without") for value in without]
     db, names = _db(ctx)
     selected = [_object(db, r) for r in objs] or None
-    try:
-        rx = re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if ignore_case else 0)
-    except re.error as e:
-        raise click.BadParameter(str(e), param_hint="PATTERN")
-
     def wanted(v) -> bool:
         return not verb_names or any(verbcasecmp(v.name, name) for name in verb_names)
 
-    if verbs_without_match:
-        if selected is None:
-            selected = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
-        for o in selected:
-            for idx, v in enumerate(o.verbs):
-                if v.code and wanted(v) and not any(rx.search(line) for line in v.code):
-                    click.echo(f"{label(db, o.id, names)}:[{idx}] {moo_string(v.name)}")
-        return
-    by_verb = groupby((h for h in grep_verbs(db, rx, selected) if wanted(h.verb)), key=lambda h: (h.obj.id, h.index))
+    owner_ids = {_object(db, r).id for r in owners} if owners else None
+    matches = grep_verbs(db, re.compile("^") if verbs_without_match else rx, selected,
+                         require=required, exclude=[*excluded, rx] if verbs_without_match else excluded, code_only=code_only,
+                         owners=owner_ids, wizard_owned=wizard_owned, executable=executable)
+    by_verb = groupby((h for h in matches if wanted(h.verb)), key=lambda h: (h.obj.id, h.index))
+    counts = {"matched_lines": 0, "matched_verbs": 0, "matched_objects": 0}
+    object_counts, owner_counts = {}, {}
+    records = []
     for n_group, (_, group) in enumerate(by_verb):
         hits = list(group)
         o, idx, v = hits[0].obj, hits[0].index, hits[0].verb
-        if verbs_only:
+        line_count = 0 if verbs_without_match else len(hits)
+        counts["matched_lines"] += line_count
+        counts["matched_verbs"] += 1
+        for groups, key in ((object_counts, o.id), (owner_counts, int(v.owner))):
+            entry = groups.setdefault(key, {"verbs": 0, "lines": 0})
+            entry["verbs"] += 1
+            entry["lines"] += line_count
+        if summary or n_group < offset or (limit is not None and n_group >= offset + limit):
+            continue
+        if output_format == "json":
+            record = {"object": o.id, "index": idx, "names": v.name, "owner": int(v.owner),
+                      "perms": verb_perms(v), "args": verb_args(v)}
+            if not (verbs_only or verbs_without_match):
+                record["lines"] = [{"line": h.lineno, "text": h.line} for h in hits]
+            records.append(record)
+            continue
+        if verbs_only or verbs_without_match:
             click.echo(f"{label(db, o.id, names)}:[{idx}] {moo_string(v.name)}")
             continue
         if not context:
@@ -1109,6 +1228,26 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
                 click.echo("--")
             sep = ":" if n in matched else "-"
             click.echo(f"#{o.id}:[{idx}] {_alias(v)}{sep}{n}{sep} {_clip(code_lines[n - 1].strip(), width, rx)}")
+    counts["matched_objects"] = len(object_counts)
+    if summary:
+        data = {**counts,
+                "objects": [{"object": key, **value} for key, value in sorted(object_counts.items())],
+                "owners": [{"owner": key, **value} for key, value in sorted(owner_counts.items())]}
+        if output_format == "json":
+            click.echo(json.dumps(data))
+        else:
+            for key, value in object_counts.items():
+                click.echo(f"#{key}: {value['verbs']} verbs, {value['lines']} matching lines")
+            for key, value in sorted(owner_counts.items()):
+                click.echo(f"owner #{key}: {value['verbs']} verbs, {value['lines']} matching lines")
+    elif output_format == "json":
+        end = min(counts["matched_verbs"], offset + len(records))
+        next_offset = end if end < counts["matched_verbs"] and records else None
+        click.echo(json.dumps({**counts, "offset": offset, "returned_verbs": len(records),
+                               "next_offset": next_offset,
+                               "truncated": len(records) < counts["matched_verbs"], "verbs": records}))
+    if output_format == "text" and (summary or limit is not None or offset):
+        click.echo(f"{counts['matched_lines']} matching lines in {counts['matched_verbs']} verbs on {counts['matched_objects']} objects")
 
 
 @moodb.command()
@@ -1223,9 +1362,14 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
 @click.option("--prop", "mode", flag_value="prop", help="Find objects defining a property named TEXT (case-insensitive).")
 @click.option("--glob", "glob", is_flag=True,
               help="With --verb or --prop: TEXT is a shell pattern (`event_*`) matched against each verb name or the property name.")
+@click.option("--no-catchall", is_flag=True,
+              help="With --verb: ignore matches made only through a catch-all name, one with no letter or digit "
+                   "before its `*` (`*`, `@*`).")
 @click.option("-c", "--count", is_flag=True, help="Print only the number of hits for each TEXT.")
+@click.option("--by-name", is_flag=True, help="Without --verb or --prop: one line per distinct name, with how many objects have it, most first.")
 @click.pass_context
-def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, count: bool) -> None:
+def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool, no_catchall: bool, count: bool,
+         by_name: bool) -> None:
     """Find objects whose name or $name contains TEXT (case-insensitive).
 
     With --verb or --prop, find where a verb or property is defined instead.
@@ -1233,15 +1377,27 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
     """
     if glob and mode is None:
         raise click.UsageError("--glob needs --verb or --prop")
+    if no_catchall and mode != "verb":
+        raise click.UsageError("--no-catchall needs --verb")
+    if by_name and mode is not None:
+        raise click.UsageError("--by-name finds by object name; it does not go with --verb or --prop")
     db, names = _db(ctx)
     hits: dict[str, list[str]] = {t: [] for t in text}
+    found_names: dict[str, Counter[str]] = {t: Counter() for t in text}
+
+    def calls(name, t):
+        if not no_catchall:
+            return answers_call(name, t)
+        return any(answers_call(alias, t) for alias in name.split()
+                   if not ("*" in alias and not re.search(r"[A-Za-z0-9]", alias.split("*")[0])))
+
     if mode == "verb":
         for o in object_heads(db):
             for idx, v in enumerate(o.verbs):
                 verb_names = v.name.lower().split()
                 verb_names += [n[1:] for n in verb_names if n.startswith(":")]  # a waif class verb, as it is called
                 for t in hits:
-                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else answers_call(v.name, t):
+                    if any(fnmatchcase(n, t.lower()) for n in verb_names) if glob else calls(v.name, t):
                         hits[t].append(f"{label(db, o.id, names)}:[{idx}] {verb_summary(v)}")
     elif mode == "prop":
         for num, defined in defined_property_names(db):
@@ -1257,10 +1413,13 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
                 needle = t.lower().lstrip("$")
                 if needle in name.lower() or needle in names.get(num, "").lower():
                     hits[t].append(label(db, num, names))
+                    found_names[t][name] += 1
     for t, lines in hits.items():
         if count:
             click.echo(f"{len(lines):6d}  {t}")
             continue
+        if by_name:
+            lines = [f"{n:6d}  {moo_string(name)}" for name, n in found_names[t].most_common()]
         if len(hits) > 1:
             click.echo(f"== {t}")
         for line in lines:
@@ -1292,6 +1451,76 @@ def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool, skipped: tup
             if skip and skip.match(r.where):
                 continue
             click.echo(f"{label(db, r.obj.id, names)}{r.where}" + (f": {_clip(r.text, width, number)}" if r.text else ""))
+
+
+@moodb.command()
+@click.argument("ref", nargs=-1)
+@click.option("--holding", metavar="PROP",
+              help="Also take as roots the objects that define property PROP, leaving out those inside another of them.")
+@click.option("--top", default=10, show_default=True, help="How many parents and definitions to name per cluster.")
+@click.option("--each", is_flag=True, help="List every outside reference, not a count per holding object.")
+@click.option("--each-under", type=int, metavar="N",
+              help="Also list each reference from holders with fewer than N, leaving whole-database lists as counts.")
+@click.pass_context
+def cluster(ctx: click.Context, ref: tuple[str, ...], holding: str | None, top: int, each: bool,
+            each_under: int | None) -> None:
+    """What would go with each REF and everything inside it: members, verbs and properties they define,
+    children and players among them, and what outside them refers to them.
+
+    "Outside" is outside every REF's cluster, so clusters given together are judged together.
+    """
+    if not ref and holding is None:
+        raise click.UsageError("give a REF or --holding PROP")
+    db, names = _db(ctx)
+    roots = [_object(db, one) for one in ref]
+    if holding is not None:
+        held = {num for num, defined in defined_property_names(db)
+                if any(isinstance(n, str) and n.lower() == holding.lower() for n in defined)}
+
+        def inside_another(num: int) -> bool:
+            seen = {num}
+            where = int(db.objects[num].location)
+            while where in db.objects and where not in seen:
+                if where in held:
+                    return True
+                seen.add(where)
+                where = int(db.objects[where].location)
+            return False
+
+        roots += [db.objects[num] for num in sorted(held) if not inside_another(num)]
+    found, inbound = clusters(db, roots)
+
+    def ranked(counter, show) -> str:
+        if not counter:
+            return "none"
+        common = counter.most_common()
+        text = ", ".join(f"{show(k)} {n}" for k, n in common[:top])
+        return text + (f", and {len(common) - top} more" if len(common) > top else "")
+
+    for c in found:
+        r = c.root
+        click.echo(f"== {label(db, r.id, names)}  owner {label(db, int(r.owner), names)}  location {label(db, int(r.location), names)}")
+        click.echo(f"  members   {len(c.members)}")
+        click.echo(f"  parents   {ranked(c.parents, lambda p: label(db, p, names))}")
+        click.echo("  verbs     " + (", ".join(f"{label(db, m.id, names)} {len(m.verbs)}" for m in c.with_verbs) or "none"))
+        click.echo(f"  defines   {ranked(c.definitions, str)}")
+        click.echo("  children outside  " + (", ".join(f"{label(db, m.id, names)} > {label(db, k.id, names)}"
+                                                   for m, k in c.outside_children) or "none"))
+        click.echo("  players   " + (", ".join(label(db, m.id, names) for m in c.players) or "none"))
+    click.echo(f"== referenced from outside: {len(inbound)}")
+    if each:
+        for i in inbound:
+            click.echo(f"  {label(db, i.holder.id, names)}{i.where} -> #{i.member}" + (f": {i.text}" if i.text else ""))
+    else:
+        holders = Counter(i.holder.id for i in inbound)
+        members = {h: len({i.member for i in inbound if i.holder.id == h}) for h in holders}
+        for h, n in holders.most_common():
+            click.echo(f"  {n:6d} references to {members[h]} members  {label(db, h, names)}")
+            if each_under is not None and n < each_under:
+                for i in inbound:
+                    if i.holder.id == h:
+                        click.echo(f"           {i.where} -> {label(db, i.member, names)}" + (f": {i.text}" if i.text else ""))
+    click.echo(f"total  {sum(len(c.members) for c in found)} members in {len(found)} clusters")
 
 
 @moodb.command()
@@ -1716,3 +1945,45 @@ register_graph(moodb)
 from .mail_cli import register_mail
 
 register_mail(moodb, _db)
+
+from .remote_cli import register_remote
+
+register_remote(moodb)
+
+
+@moodb.command()
+@click.argument("other", type=click.Path(exists=True, dir_okay=False))
+@click.argument("refs", nargs=-1)
+@click.option("--threshold", type=click.FloatRange(0, 1), default=0.5, show_default=True,
+              help="Least share of common lines for a same-named verb to count as similar.")
+@click.option("--verbs", "show_verbs", is_flag=True, help="List every verb with where it matched.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.pass_context
+def match(ctx: click.Context, other: str, refs: tuple[str, ...], threshold: float, show_verbs: bool, fmt: str) -> None:
+    """Which objects of OTHER (all with code, or REFS) already exist in --db, judged by verb code.
+
+    A verb matches exactly when its source is the same after indentation, blank
+    lines and "Last modified" footers are removed; it is similar when a verb
+    sharing one of its names has at least THRESHOLD of its lines. Verdicts:
+    "have it" (80% exact), "have a different version" (half exact or similar),
+    "new".
+    """
+    from .inspection import all_objects
+    from .match import VerbIndex, match_objects, verdict
+    db, _ = _db(ctx)
+    other_db = load(other)
+    objs = [_object(other_db, r) for r in refs] if refs else [o for o in all_objects(other_db) if any(v.code for v in o.verbs)]
+    results = match_objects(VerbIndex(db), objs, threshold)
+    for r in results:
+        r["verdict"] = verdict(r)
+    if fmt == "json":
+        click.echo(json.dumps(results, ensure_ascii=True))
+        return
+    for r in results:
+        click.echo(f"#{r['object']} {r['name']}: {r['verdict']} "
+                   f"(exact {r['exact']}, similar {r['similar']}, new {r['new']})")
+        if show_verbs:
+            for v in r["verbs"]:
+                where = ", ".join(f"#{p[0]}:{p[2].split()[0]}" if v["match"] == "exact"
+                                  else f"#{p[1][0]}:{p[1][2].split()[0]} {p[0]:.0%}" for p in v["where"])
+                click.echo(f"    {v['verb']}: {v['match']}{'  ' + where if where else ''}")

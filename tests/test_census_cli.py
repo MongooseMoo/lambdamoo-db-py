@@ -84,7 +84,11 @@ def test_format_time_takes_any_task_time():
     assert format_time(0) == "1970-01-01 00:00:00Z"
     assert format_time(-86400) == "1969-12-31 00:00:00Z"
     assert format_time(1792279400) == "2026-10-17 23:23:20Z"
-    assert format_time(9223372036854775807) == "9223372036854775807s"  # suspended without a deadline
+    assert format_time(9223372036854775807) == "until resumed"
+    assert format_time(9223372036854775806) == "9223372036854775806s"
+    assert format_time(-9223372036854775808) == "-9223372036854775808s"
+    assert format_time(253402300799) == "9999-12-31 23:59:59Z"
+    assert format_time(253402300800) == "253402300800s"
     assert format_time(None) == "-"
 
 

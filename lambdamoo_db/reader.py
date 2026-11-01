@@ -1,5 +1,6 @@
 import re
 import math
+from io import BytesIO
 from logging import DEBUG, getLogger
 from typing import Any, NoReturn, Pattern, Protocol, Union
 
@@ -40,18 +41,44 @@ class _LineSource:
 
     def __init__(self, data: bytes) -> None:
         self.data = bytes(data)
-        self.offset = 0
-        self.last_line_start = 0
+        source = BytesIO(self.data)
+        self._readline = source.readline
+        self._tell = source.tell
+        self._last_line = b""
+
+    @property
+    def offset(self) -> int:
+        return self._tell()
+
+    @property
+    def last_line_start(self) -> int:
+        return self._tell() - len(self._last_line)
 
     def readline(self) -> str:
-        start = self.offset
-        if start >= len(self.data):
-            return ""
-        end = self.data.find(b"\n", start)
-        end = len(self.data) if end == -1 else end + 1
-        self.last_line_start = start
-        self.offset = end
-        return self.data[start:end].decode("latin-1")
+        return self._next().decode("latin-1")
+
+    def _next(self) -> bytes:
+        """Read one LF-delimited line, retaining its delimiter and byte offsets."""
+        line = self._readline()
+        if line:
+            self._last_line = line
+        return line
+
+    def readvalue(self) -> str | None:
+        """The next line without its delimiter, as Reader.readString wants it; None at the end."""
+        line = self._next()
+        if not line:
+            return None
+        if line.endswith(b"\n"):
+            line = line[:-1]
+            if line.endswith(b"\r"):
+                line = line[:-1]
+        return line.decode("latin-1")
+
+    def readint(self) -> int | None:
+        """The next line as an integer, read from the bytes without decoding; None at the end."""
+        line = self._next()
+        return int(line) if line else None
 
 
 def load_bytes(data: bytes, filename: str = "<bytes>") -> MooDatabase:
@@ -107,6 +134,10 @@ class Reader:
         self.filename = filename
         self.file = fio
         self.line = 0
+        # A dump is tens of millions of lines; a _LineSource hands each one over already
+        # stripped, and integers straight from the bytes.
+        self._readvalue = getattr(fio, "readvalue", None)
+        self._readint = getattr(fio, "readint", None)
         # Private split scanner mode: consume serialized structure to discover
         # boundaries without constructing semantic maps. Its temporary model
         # must never be returned as a loaded database.
@@ -226,6 +257,11 @@ class Reader:
     def readString(self) -> str:
         """Read a string from the database file"""
         self.line += 1
+        if self._readvalue is not None:
+            value = self._readvalue()
+            if value is None:
+                self.parse_error("unexpected end of source (EOF)", "unexpected_eof")
+            return value
         line = self.file.readline()
         if line == "":
             self.parse_error("unexpected end of source (EOF)", "unexpected_eof")
@@ -241,6 +277,15 @@ class Reader:
 
     def readInt(self) -> int:
         """Read an integer from the database file"""
+        if self._readint is not None:
+            self.line += 1
+            try:
+                value = self._readint()
+            except ValueError:
+                self.parse_error("invalid integer")
+            if value is None:
+                self.parse_error("unexpected end of source (EOF)", "unexpected_eof")
+            return value
         line = self.readString()
         try:
             return int(line)
@@ -558,6 +603,10 @@ class Reader:
         logger.debug(f"Finished reading {db.total_players} players")
 
     def readAnonObjects(self, db: MooDatabase) -> None:
+        # Recycled permanent slots have no object definition. Toast can use
+        # their numeric IDs for anonymous definitions (db_read_anonymous).
+        # Keep live definitions reserved, including across anonymous batches.
+        self._object_ids.difference_update(db.recycled_objects)
         while True:
             num_anon = self.readCount()
             if num_anon == 0:
@@ -638,7 +687,7 @@ class Reader:
                 logger.debug(f"  reading property[{idx}]")
             value = self.readValue(db)
             owner = self.readObjnum()
-            perms = PropertyFlags(self.readInt())
+            perms = self.readInt()  # Property's converter makes it PropertyFlags
             if debug:
                 logger.debug(f"    owner=#{owner}, perms={perms}")
             property = Property(propertyName, value, owner, perms)

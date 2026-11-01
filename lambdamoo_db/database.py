@@ -69,7 +69,7 @@ class Verb:
 
 @attrs.define()
 class Property:
-    propertyName: str
+    propertyName: str = attrs.field(on_setattr=attrs.setters.NO_OP)
     value: Any
     owner: int
     perms: PropertyFlags = attrs.field(converter=PropertyFlags)
