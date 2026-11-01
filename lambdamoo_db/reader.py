@@ -603,6 +603,10 @@ class Reader:
         logger.debug(f"Finished reading {db.total_players} players")
 
     def readAnonObjects(self, db: MooDatabase) -> None:
+        # Recycled permanent slots have no object definition. Toast can use
+        # their numeric IDs for anonymous definitions (db_read_anonymous).
+        # Keep live definitions reserved, including across anonymous batches.
+        self._object_ids.difference_update(db.recycled_objects)
         while True:
             num_anon = self.readCount()
             if num_anon == 0:

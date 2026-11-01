@@ -202,7 +202,9 @@ def test_anonymous_and_waif_dump_ids_are_not_numeric_server_map_keys():
 
 @pytest.mark.parametrize("records, anon", [([object_record(), object_record()], b"0\n"),
     ([object_record(), b"#0 recycled\n"], b"0\n"), ([b"#1 recycled\n"] * 2, b"0\n"),
-    ([object_record()], b"1\n" + object_record() + b"0\n")])
+    ([object_record()], b"1\n" + object_record() + b"0\n"),
+    ([object_record(), b"#1 recycled\n"], b"2\n" + object_record(1) * 2 + b"0\n"),
+    ([object_record(), b"#1 recycled\n"], b"1\n" + object_record(1) + b"1\n" + object_record(1) + b"0\n")])
 def test_duplicate_object_record_ids_fail(records, anon):
     with pytest.raises(Exception, match="duplicate"):
         load_bytes(database_bytes(records, anonymous=anon))
@@ -214,6 +216,31 @@ def test_recycled_and_anon_counts_use_serialized_sections():
     assert db.total_objects == 2
     assert set(db.objects) == {0, 2} and db.objects[2].anon
     assert db.recycled_objects == {1}
+
+
+def test_anonymous_definition_can_reuse_recycled_permanent_slot(tmp_path):
+    from lambdamoo_db.lazy import LazyDatabase, build_index
+    from lambdamoo_db.split import split_bytes
+
+    # Barn's Test.db has a recycled #15529 followed by anonymous #15529.
+    data = database_bytes([object_record(), b"# 1 recycled\n"],
+                          anonymous=b"1\n" + object_record(1, verbs=1) + b"0\n",
+                          programs=b"1\n#1:0\nreturn 42;\n.\n")
+    db = load_bytes(data)
+    assert db.total_objects == 2 and db.recycled_objects == {1}
+    assert db.objects[1].anon and db.objects[1].verbs[0].code == ["return 42;"]
+    output = StringIO()
+    Writer(db=db, output_file=output).writeDatabase()
+    assert output.getvalue().encode("latin-1") == data
+    assert b"".join(piece for _, piece in split_bytes(data)) == data
+
+    path = tmp_path / "recycled-anon.db"
+    path.write_bytes(data)
+    index, indexed = build_index(path)
+    lazy = LazyDatabase(path, index)
+    assert indexed.objects == db.objects
+    assert lazy.objects[1] == db.objects[1]
+    assert lazy.recycled_objects == {1}
 
 
 def test_repeated_program_definition_fails():
