@@ -1610,15 +1610,20 @@ def players(ctx: click.Context) -> None:
 
 @moodb.command()
 @click.option("-v", "--verbose", is_flag=True, help="Show every stack frame, outermost first.")
+@click.option("--this", "receivers", multiple=True,
+              help="Only tasks with a frame whose this is this object (repeatable).")
 @click.pass_context
-def tasks(ctx: click.Context, verbose: bool) -> None:
+def tasks(ctx: click.Context, verbose: bool, receivers: tuple[str, ...]) -> None:
     """List queued (forked), suspended and interrupted tasks saved in the dump.
 
     Each line shows the task id, when it is due to run (UTC), and its
     innermost frame as #DEFINER:verb.
     """
     db, _ = _db(ctx)
+    wanted = {_object(db, ref).id for ref in receivers}
     for t in list_tasks(db):
+        if wanted and not any(a.this in wanted for a in t.frames):
+            continue
         top = frame_text(t.frames[-1]) if t.frames else "(no frames)"
         more = f"  (+{len(t.frames) - 1} frames)" if len(t.frames) > 1 and not verbose else ""
         click.echo(f"{t.kind} {t.id}  {format_time(t.when)}  {top}{more}")
