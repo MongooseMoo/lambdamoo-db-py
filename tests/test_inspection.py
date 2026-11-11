@@ -781,6 +781,9 @@ def test_cli_new_commands():
 
     r = run("tasks")
     assert r.output.startswith("queued 419331400  2022-12-17 08:00:01Z  #79:schedule_measurement_task")
+    assert run("tasks", "--this", "#79").output == r.output
+    r = run("tasks", "--this", "#2")
+    assert r.exit_code == 0 and r.output == ""
 
 
 def test_cli_lookup_errors_exit_nonzero():
