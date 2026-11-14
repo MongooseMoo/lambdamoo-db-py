@@ -23,6 +23,7 @@ moodb prop '$httpd.port'       # effective value, following clear
 moodb grep -C 2 'notify('      # search all verb code
 moodb refs '$httpd'            # who points at #N, in properties and code
 moodb values '\.ogg$'          # where a string is stored, through lists, maps and waifs
+moodb sound-refs --summary     # stored sound catalog ids, groups, paths and slices, by kind
 ```
 
 ### References
@@ -76,6 +77,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `find --prop NAME` | objects defining a property called NAME |
 | `refs REF` | property values holding the object, and verb code lines mentioning `#N` or its `$name` |
 | `values PATTERN [-i] [-F] [--in-waif REF]` | Python regex over every stored string: each object's own property values (anonymous objects included), through lists, map keys and values, and into waifs. Prints the path, e.g. `#4982.systems[10]<waif #4238>.sounds["engage"]<waif #3010>.snd = "..."`, with waif slots named and list indexes 1-based. `--in-waif` keeps only strings inside a waif of that class or a descendant |
+| `sound-refs [--kind K]... [--ids FILE] [--skip GLOB]... [--code] [--summary] [--format text\|jsonl]` | every stored sound catalog reference, following the game's grammar of a sound value (`#2585:_snd_candidates`): INT sound ids and `["group" -> n]`/`["sound" -> n]` maps, alone or in lists, in properties and waif slots named `*_snd` and in `$social`'s `"sound"`/`"sounds"`; maps of only sound-entry keys anywhere; `$catalog_sound` waif id slots; strings ending in a sound file extension (a slice with `#N`). One line per reference: holder and path, kind (`sound group content asset segment path slice code`), value, context. `--ids FILE` takes `KIND<TAB>VALUE` lines, prints only those references and exits 1 if any is found; `--code` (with `--ids`) adds verb code lines holding one of them as a literal. `--skip` leaves out caches and pick memories by property or slot name and counts them on stderr. Integers in other properties are not seen |
 | `children REF [-r]`, `contents REF [-r]` | direct or recursive children / contents; `--summary [--format json]` measures the whole reachable graph |
 | `players` | player objects and their flags |
 | `tasks [-v]` | queued, suspended and interrupted tasks: id, due time (UTC) and frame; `-v` shows the whole stack |
@@ -533,8 +535,8 @@ itself:
 - `info` uses indexed object and verb counts, reads the header for tasks, and
   reads object #0 and its dependencies for `$names`; it does not parse every
   object on a cached query. Empty programs are still excluded from "with code".
-- `refs` and `values` look at every object, so they parse the whole dump each
-  time.
+- `refs`, `values` and `sound-refs` look at every object, so they parse the
+  whole dump each time.
 
 The index lives under `lambdamoo-db` in `$XDG_CACHE_HOME`, `%LOCALAPPDATA%` or
 `~/.cache`. Change that with `--cache-dir`. `--no-cache` parses the whole dump

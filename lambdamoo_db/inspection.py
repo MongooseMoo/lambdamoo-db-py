@@ -14,7 +14,8 @@ import hashlib
 import re
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator, Sequence
+from fnmatch import fnmatchcase
+from typing import Any, Callable, Iterator, NamedTuple, Sequence
 
 import attrs
 
@@ -806,27 +807,42 @@ class StoredString:
     waif_classes: tuple[int, ...]  # classes of the waifs passed through, outermost first
 
 
-def find_strings(db: MooDatabase, pattern: re.Pattern[str]) -> Iterator[StoredString]:
-    """Every stored string matching ``pattern``, with the path to it.
+class ValueStep(NamedTuple):
+    """One step on the path from an object to a stored value."""
 
-    Searches each object's own (non-clear) property slots, anonymous objects
+    kind: str  # prop, slot, index, key (into a map value), keyof (a map key itself)
+    key: Any  # property or slot name, 1-based list index, or map key
+    waif_class: int | None = None  # for a slot: the class of the waif entered
+
+
+@attrs.frozen
+class StoredValue:
+    obj: MooObject  # the object whose property holds the value, directly or through waifs
+    where: str  # ".prop[2]<waif #3010>.snd"; list indexes are 1-based like MOO
+    value: Any
+    steps: tuple[ValueStep, ...]  # the path as steps, the property first
+
+
+def walk_stored_values(db: MooDatabase, skip: Callable[[str], bool] | None = None) -> Iterator[StoredValue]:
+    """Every stored value and every value inside it, each container before its members.
+
+    Walks each object's own (non-clear) property slots, anonymous objects
     included, through lists, map keys and values, and into waif bodies. A waif
-    held in several places is reported once per holder. A waif that contains
-    itself is entered once per path.
+    held in several places is walked once per holder. A waif that contains
+    itself is entered once per path. A property or waif slot whose name
+    ``skip`` accepts is not entered.
     """
     slot_names: dict[int, list[str]] = {}
 
-    def walk(value: Any, where: str, classes: tuple[int, ...], open_waifs: frozenset[int]) -> Iterator[tuple[str, str, tuple[int, ...]]]:
-        if isinstance(value, str):
-            if pattern.search(value):
-                yield where, value, classes
-        elif isinstance(value, list):
+    def walk(obj: MooObject, value: Any, where: str, steps: tuple[ValueStep, ...], open_waifs: frozenset[int]) -> Iterator[StoredValue]:
+        yield StoredValue(obj, where, value, steps)
+        if isinstance(value, list):
             for i, item in enumerate(value, 1):
-                yield from walk(item, f"{where}[{i}]", classes, open_waifs)
+                yield from walk(obj, item, f"{where}[{i}]", (*steps, ValueStep("index", i)), open_waifs)
         elif isinstance(value, dict):
             for key, item in value.items():
-                yield from walk(key, f"{where}.keys[{_format(key)}]", classes, open_waifs)
-                yield from walk(item, f"{where}[{_format(key)}]", classes, open_waifs)
+                yield from walk(obj, key, f"{where}.keys[{_format(key)}]", (*steps, ValueStep("keyof", key)), open_waifs)
+                yield from walk(obj, item, f"{where}[{_format(key)}]", (*steps, ValueStep("key", key)), open_waifs)
         elif isinstance(value, WaifReference):
             waif = db.waifs.get(value.index)
             if waif is None or value.index in open_waifs:
@@ -837,7 +853,9 @@ def find_strings(db: MooDatabase, pattern: re.Pattern[str]) -> Iterator[StoredSt
             names = slot_names[cls]
             for slot, item in waif.props:
                 name = names[slot] if slot < len(names) else f"slot{slot}"
-                yield from walk(item, f"{where}<waif #{cls}>.{name}", (*classes, cls), open_waifs | {value.index})
+                if skip is not None and skip(name):
+                    continue
+                yield from walk(obj, item, f"{where}<waif #{cls}>.{name}", (*steps, ValueStep("slot", name, cls)), open_waifs | {value.index})
 
     for obj in db.objects.values():
         names = [p.propertyName for a in db.ancestors(obj) for p in own_properties(a)]
@@ -845,8 +863,150 @@ def find_strings(db: MooDatabase, pattern: re.Pattern[str]) -> Iterator[StoredSt
             if prop.value is CLEAR:
                 continue
             name = names[index] if index < len(names) else f"slot{index}"
-            for where, value, classes in walk(prop.value, f".{name}", (), frozenset()):
-                yield StoredString(obj, where, value, classes)
+            if skip is not None and skip(name):
+                continue
+            yield from walk(obj, prop.value, f".{name}", (ValueStep("prop", name),), frozenset())
+
+
+def find_strings(db: MooDatabase, pattern: re.Pattern[str]) -> Iterator[StoredString]:
+    """Every stored string matching ``pattern``, with the path to it (see ``walk_stored_values``)."""
+    for v in walk_stored_values(db):
+        if isinstance(v.value, str) and pattern.search(v.value):
+            yield StoredString(v.obj, v.where, v.value, tuple(s.waif_class for s in v.steps if s.kind == "slot"))
+
+
+# The keys a sound entry map may have (#2585:_snd_candidates lines 9-10).
+SOUND_ENTRY_KEYS = frozenset({"group", "sound", "volume", "gain_db", "vary", "normalize", "modifiers"})
+# Slots of a $catalog_sound waif holding catalog row ids, and the kind of row each names.
+CATALOG_SLOTS = {"sound_id": "sound", "content_id": "content", "asset_id": "asset", "segment_id": "segment", "variation_group_id": "group"}
+CATALOG_ID_KINDS = ("sound", "group", "content", "asset", "segment", "path", "slice")  # what an --ids line may name
+CATALOG_REF_KINDS = (*CATALOG_ID_KINDS, "code")
+_SOUND_FILE = re.compile(r"\.(m4a|ogg|wav|mp3|flac|aiff?|opus)(#\d+)?$", re.IGNORECASE)
+
+
+@attrs.frozen
+class CatalogRef:
+    obj: MooObject  # the object holding the reference (for kind code, the verb's object)
+    where: str  # path syntax of StoredString, or ":[idx] verb:line" for kind code
+    kind: str  # one of CATALOG_REF_KINDS
+    value: int | str
+    context: str  # snd-property, snd-slot, social, snd-map, catalog-waif, string, code
+    holder: str  # the innermost property or waif slot name on the path; for kind code, the verb's name
+
+
+def _is_int(value: Any) -> bool:
+    """A MOO INT: ObjNum and the other tagged scalars are not int, bool is excluded."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _sound_value_start(steps: tuple[ValueStep, ...], on_social: bool) -> tuple[int, str] | None:
+    """Where a sound value begins on this path (index into ``steps``) and the context naming why, or None.
+
+    A property or waif slot named ``*_snd`` holds one; on ``$social``, so do a
+    social's ``["sound"]`` and each of its ``["sounds"][form]``
+    (#1652:test_all_socials_populated lines 19-27).
+    """
+    for i, step in enumerate(steps):
+        if step.kind in ("prop", "slot") and isinstance(step.key, str) and step.key.lower().endswith("_snd"):
+            return i + 1, "snd-property" if step.kind == "prop" else "snd-slot"
+    if on_social and len(steps) >= 2 and steps[1] == ValueStep("key", "sound"):
+        return 2, "social"
+    if on_social and len(steps) >= 3 and steps[1] == ValueStep("key", "sounds") and steps[2].kind == "key":
+        return 3, "social"
+    return None
+
+
+def _sound_value_position(rest: tuple[ValueStep, ...]) -> str | None:
+    """What a value at ``rest`` (the steps after a sound value's start) is in the grammar.
+
+    ``"sound"``: an entry (the value itself, or one member of its list);
+    ``"group"``/``"sound-key"``: an entry map's ``"group"``/``"sound"``;
+    None: anywhere else, such as ``"volume"`` or the numbers of ``"vary"``.
+    """
+    if rest and rest[0].kind == "index":
+        rest = rest[1:]
+    if not rest:
+        return "sound"
+    if len(rest) == 1 and rest[0].kind == "key" and rest[0].key in ("group", "sound"):
+        return "group" if rest[0].key == "group" else "sound-key"
+    return None
+
+
+def find_catalog_refs(db: MooDatabase, catalog_class: int | None, social: int | None, skip: Sequence[str] = (),
+                      skipped: Counter | None = None) -> Iterator[CatalogRef]:
+    """Every stored sound catalog reference, following the game's grammar of a sound value (#2585:_snd_candidates).
+
+    A sound value is one entry or a list of entries; an entry is an INT > 0
+    (a sound id), a STR (a path or slice name) or a map holding exactly one of
+    ``"group"`` and ``"sound"``. Rules:
+
+    1. A sound value is held in a property or waif slot named ``*_snd``, or on
+       ``social`` under a social's ``"sound"`` or ``"sounds"[form]``.
+    2. In a sound value, an INT > 0 entry is a sound; in an entry map an INT > 0
+       under ``"group"`` is a group and under ``"sound"`` a sound.
+    3. Elsewhere, a map whose keys are all sound entry keys and that holds an
+       INT > 0 under ``"group"`` or ``"sound"`` gives that group or sound (snd-map).
+    4. In a waif of ``catalog_class`` or a descendant, an INT > 0 in a
+       ``CATALOG_SLOTS`` slot names that row; an object number there is unset.
+    5. Any STR ending in a sound file extension is a path, or a slice with ``#N``.
+    6. A property or waif slot whose name matches a ``skip`` glob is not
+       entered; ``skipped`` counts them by name.
+    """
+    catalog = set()
+    if catalog_class is not None and catalog_class in db.objects:
+        catalog = {catalog_class, *(d.id for d in descendants(db, db.objects[catalog_class]))}
+
+    def skip_name(name: str) -> bool:
+        if any(fnmatchcase(name, g) for g in skip):
+            if skipped is not None:
+                skipped[name] += 1
+            return True
+        return False
+
+    for v in walk_stored_values(db, skip_name if skip else None):
+        value, steps = v.value, v.steps
+        holder = next(s.key for s in reversed(steps) if s.kind in ("prop", "slot"))
+        if isinstance(value, str):
+            match = _SOUND_FILE.search(value)
+            if match:
+                yield CatalogRef(v.obj, v.where, "slice" if match.group(2) else "path", value, "string", holder)
+            continue
+        start = _sound_value_start(steps, v.obj.id == social)
+        position = _sound_value_position(steps[start[0]:]) if start else None
+        if _is_int(value) and value > 0:
+            last = steps[-1]
+            if position is not None:
+                yield CatalogRef(v.obj, v.where, "group" if position == "group" else "sound", value, start[1], holder)
+            elif last.kind == "slot" and last.waif_class in catalog and last.key in CATALOG_SLOTS:
+                yield CatalogRef(v.obj, v.where, CATALOG_SLOTS[last.key], value, "catalog-waif", holder)
+        elif isinstance(value, dict) and position != "sound" and value and set(value) <= SOUND_ENTRY_KEYS:
+            for key in ("group", "sound"):
+                if key in value and _is_int(value[key]) and value[key] > 0:
+                    yield CatalogRef(v.obj, f"{v.where}[{_format(key)}]", key, value[key], "snd-map", holder)
+
+
+_STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_INT_LITERAL = re.compile(r"(?<![\w#.])\d+(?![\w.])")
+
+
+def find_code_literals(db: MooDatabase, numbers: set[int], strings: set[str]) -> Iterator[CatalogRef]:
+    """Verb code lines holding one of ``numbers`` as an integer literal or one of ``strings`` as a string literal.
+
+    Integers are read with string literals (comments included) masked, and
+    ``#N`` object numbers and decimals are not integers.
+    """
+    programs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+    for o in programs:
+        for idx, v in enumerate(o.verbs):
+            original = v.code or []
+            name = v.name.split(" ")[0]
+            for n, line in enumerate(mask_moo_strings(original), 1):
+                where = f":[{idx}] {name}:{n}"
+                for number in sorted({int(m) for m in _INT_LITERAL.findall(line)} & numbers):
+                    yield CatalogRef(o, where, "code", number, "code", name)
+                literals = {re.sub(r"\\(.)", r"\1", m) for m in _STRING_LITERAL.findall(original[n - 1])}
+                for text in sorted(literals & strings):
+                    yield CatalogRef(o, where, "code", text, "code", name)
 
 
 # --------------------------------------------------------------------------
