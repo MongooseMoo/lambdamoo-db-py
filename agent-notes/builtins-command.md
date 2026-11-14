@@ -18,6 +18,12 @@ missing from a server's list. Requested for the Toast-to-Barn switch (hub report
 - Tests `tests/test_builtins_cli.py` (synthetic fixtures), README section
   "Builtins the code calls" and a row in the command table.
 - Local commits only; not pushed, no PR.
+- Run on the 2026-11-12T0055 Mongoose dump: 223 distinct builtins at 139846
+  sites, 2m45s including the index build. Its counts for the fork builtins and
+  the 2-argument `valid` match the earlier one-off grep in the hub report.
+  `--against` Barn's 260 catalog names: 14 missing, 6 fork builtins plus 8 old
+  FUP/LambdaMOO names reached through `call_function` that Toast lacks too.
+  Results are in the hub's `reports/barn-switch-work-02-moodb-builtins-2026-11-13.md`.
 
 ## Decisions and why
 
@@ -35,6 +41,13 @@ missing from a server's list. Requested for the Toast-to-Barn switch (hub report
 ## Surprises
 
 - `uv run` creates `uv.lock` in the worktree; it is left untracked, not committed.
+- The dump's `call_function` calls name eight functions that no server
+  registers (`enlist`, `fileexists`, `filegrep`, `filelength`, `filelist`,
+  `fileread`, `tonum`, `us_time`). Checking literal `call_function` names is
+  what finds them.
+- The `args` column finds argument-count errors too: the one `random` site
+  with 12 arguments (`#1652:[11]` line 16) was checked in its source and is a real
+  12-argument call (an E_ARGS error on any server), not a miscount.
 
 ## Next step
 
