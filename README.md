@@ -603,10 +603,13 @@ continuation, the language version, the VM header's `top`/`vector`/`funcId`/
 `unused`). `task` is everything else: id, start time, this, player, programmer,
 verb, source, variables, task-local and resume values. The report's
 `Runtime changes:` line and the footer's `runtime_changes` count both; a dump
-loaded and saved again by a different server keeps its tasks when `task` is 0:
+loaded and saved again by a different server keeps its tasks when `task` is 0.
+`Tasks paired by id:` (footer `task_pairing`) counts matched and one-sided tasks
+per list. Two hourly checkpoints of one live server, an hour apart, gave:
 
 ```
-Runtime changes: {"other":0,"task":0,"vm_private":212}
+Runtime changes: {"other":2,"task":85,"vm_private":0}
+Tasks paired by id: {"interruptedTasks":{"matched":2,"new_only":0,"old_only":0},"queuedTasks":{"matched":59,"new_only":34,"old_only":36},"suspendedTasks":{"matched":1,"new_only":9,"old_only":2}}
 ```
 
 `other` is the rest of the runtime section (pending values, connections,

@@ -37,7 +37,18 @@ README section "Comparing saved tasks across servers". Committed locally only.
 
 ## Surprises
 
-- `moodb diff --view checkpoint` on two real Mongoose dumps takes more than 10 minutes.
+- `moodb diff --view checkpoint` on two real Mongoose dumps took more than 10 minutes
+  (the 600 s foreground limit expired; it finished in the background; exact time not
+  recorded).
+
+## Real-dump proof
+
+`mongoose.db.new.2026-11-12T0055` against `2026-11-11T2155`, `--view checkpoint
+--section runtime --section serialization --max-events 0`: completed, exit 1
+(different), scan complete, no errors. Tasks paired by id: queued 59 matched, 36 old
+only, 34 new only; suspended 1 matched, 2 old only, 9 new only; interrupted 2 matched.
+Runtime changes: task 85, vm_private 0, other 2; serialization 3. Not measured: how many
+events carry a whitespace label (counting needs event details; no tool option yet).
 
 ## Next step
 
