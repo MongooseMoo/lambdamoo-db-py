@@ -423,6 +423,145 @@ def grep_verbs(db: MooDatabase, pattern: re.Pattern[str], objs: list[MooObject] 
                     yield GrepHit(o, idx, v, n, original[n - 1])
 
 
+_MOO_TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|[A-Za-z_][A-Za-z0-9_]*|[0-9][A-Za-z0-9_]*|\.\.|\s+|.', re.S)
+_MOO_KEYWORDS = frozenset({"if", "elseif", "else", "endif", "for", "in", "endfor", "fork", "endfork", "return",
+                           "while", "endwhile", "try", "except", "finally", "endtry", "break", "continue", "any"})
+_LABEL_KEYWORDS = frozenset({"while", "fork", "except"})  # `while NAME (`, `fork NAME (`, `except NAME (`
+_CLOSERS = {"(": ")", "[": "]", "{": "}", "`": "'"}
+
+
+@attrs.frozen
+class BuiltinCall:
+    """One call of a builtin function in verb code.
+
+    ``args`` is the number of argument expressions written, with ``@`` appended
+    when one of them is a ``@`` splice (the real count is known only when it runs).
+    ``via`` is ``direct`` (``name(...)``), ``call_function`` (``call_function("name", ...)``
+    with a literal name) or ``bf_wrapper`` (``X:bf_name(...)`` where ``bf_name`` is a
+    wrapper verb on ``#0`` or its ancestors). ``in_wrapper`` marks calls made inside
+    such a wrapper verb.
+    """
+    name: str
+    obj: int
+    index: int
+    verb: str
+    line: int  # 1-based
+    args: str
+    via: str
+    in_wrapper: bool
+
+
+def builtin_wrappers(db: MooDatabase) -> dict[str, tuple[int, int]]:
+    """Builtin name -> (object, verb index) of each ``bf_<name>`` verb on ``#0`` or its ancestors.
+
+    The server calls ``#0:bf_<name>`` (found by inheritance) for a protected
+    builtin, so the first definition in ``db_ancestors()`` order wins.
+    """
+    system = db.objects.get(0)
+    found: dict[str, tuple[int, int]] = {}
+    if system is None:
+        return found
+    for o in db.ancestors(system):
+        for idx, v in enumerate(o.verbs):
+            for alias in v.name.split():
+                if alias.lower().startswith("bf_") and len(alias) > 3:
+                    found.setdefault(alias[3:].lower(), (o.id, idx))
+    return found
+
+
+def _string_literal(token: str) -> str:
+    return re.sub(r'\\(.)', r'\1', token[1:-1], flags=re.S)
+
+
+def builtin_calls_in_code(lines: Sequence[str], wrappers: Sequence[str] | set[str] = ()) -> Iterator[tuple[str, int, str, str]]:
+    """Yield ``(name, line, args, via)`` for each builtin call in MOO source lines.
+
+    A lexical scan following the grammar's rule that a builtin call is an
+    identifier followed by ``(``: verb calls (after ``:`` or ``$``), property
+    names (after ``.``), keywords and the labels of ``while``/``fork``/``except``
+    are not calls. Arguments are counted at the top level of the call's
+    parentheses; string contents are never read as code.
+    """
+    wrapper_names = {w.lower() for w in wrappers}
+    prev: tuple[str, int] | None = None  # previous significant token and its line
+    prev2: str | None = None
+    line = 1
+    stack: list[dict[str, Any]] = []
+    for m in _MOO_TOKEN.finditer("\n".join(lines)):
+        tok = m.group()
+        if tok.isspace():
+            line += tok.count("\n")
+            continue
+        top = stack[-1] if stack else None
+        if top is not None and "name" in top and tok not in (")", ","):
+            if tok == "@" and top["cur"] == 0:
+                top["splice"] = True
+            if top["argc"] == 0:
+                top["first"].append(tok)
+            top["cur"] += 1
+        if tok in _CLOSERS:
+            frame: dict[str, Any] = {"closer": _CLOSERS[tok]}
+            if tok == "(" and prev is not None and (prev[0][0].isalpha() or prev[0][0] == "_"):
+                word = prev[0].lower()
+                if prev2 == ":" and word.startswith("bf_") and word[3:] in wrapper_names:
+                    frame.update(name=word[3:], via="bf_wrapper")
+                elif word not in _MOO_KEYWORDS and prev2 not in (":", "$", ".") and (prev2 or "").lower() not in _LABEL_KEYWORDS:
+                    frame.update(name=word, via="direct")
+                if "name" in frame:
+                    frame.update(line=prev[1], argc=0, cur=0, splice=False, first=[])
+            stack.append(frame)
+        elif tok == "," and top is not None and "name" in top:
+            top["argc"] += 1
+            top["cur"] = 0
+        elif stack and tok == stack[-1]["closer"]:
+            done = stack.pop()
+            if "name" in done:
+                count = done["argc"] + (1 if done["cur"] or done["argc"] else 0)
+                splice = "@" if done["splice"] else ""
+                yield done["name"], done["line"], f"{count}{splice}", done["via"]
+                first = done["first"]
+                if done["name"] == "call_function" and len(first) == 1 and first[0].startswith('"'):
+                    yield _string_literal(first[0]).lower(), done["line"], f"{count - 1}{splice}", "call_function"
+        prev2 = prev[0] if prev is not None else None
+        prev = (tok, line)
+
+
+def builtin_calls(db: MooDatabase, objs: list[MooObject] | None = None) -> Iterator[BuiltinCall]:
+    """Every builtin call in the verb code of objs (default: every object with code)."""
+    wrappers = builtin_wrappers(db)
+    wrapper_verbs = set(wrappers.values())
+    if objs is None:
+        objs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
+    for o in objs:
+        for idx, v in enumerate(o.verbs):
+            inside = (o.id, idx) in wrapper_verbs
+            for name, line, args, via in builtin_calls_in_code(v.code or [], wrappers):
+                yield BuiltinCall(name, o.id, idx, v.name, line, args, via, inside)
+
+
+def builtin_call_summary(calls: Iterator[BuiltinCall] | list[BuiltinCall], *, sites: bool = False) -> list[dict[str, Any]]:
+    """One record per builtin name, in name order: call sites, verbs, objects, argument counts, routes."""
+    grouped: dict[str, list[BuiltinCall]] = {}
+    for c in calls:
+        grouped.setdefault(c.name, []).append(c)
+    result = []
+    for name in sorted(grouped):
+        group = grouped[name]
+        record: dict[str, Any] = {
+            "name": name,
+            "sites": len(group),
+            "verbs": len({(c.obj, c.index) for c in group}),
+            "objects": len({c.obj for c in group}),
+            "arg_counts": dict(sorted(Counter(c.args for c in group).items())),
+            "via": dict(sorted(Counter(c.via for c in group).items())),
+        }
+        if sites:
+            record["calls"] = [{"object": c.obj, "index": c.index, "verb": c.verb, "line": c.line,
+                                "args": c.args, "via": c.via, "in_wrapper": c.in_wrapper} for c in group]
+        result.append(record)
+    return result
+
+
 def _verb_keys(obj: MooObject) -> dict[tuple[str, str, int], tuple[int, Verb]]:
     """Each verb of obj under (names, arg spec, nth verb with those), so reordering does not unpair verbs."""
     seen: Counter[tuple[str, str]] = Counter()
