@@ -78,7 +78,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `values PATTERN [-i] [-F] [--in-waif REF]` | Python regex over every stored string: each object's own property values (anonymous objects included), through lists, map keys and values, and into waifs. Prints the path, e.g. `#4982.systems[10]<waif #4238>.sounds["engage"]<waif #3010>.snd = "..."`, with waif slots named and list indexes 1-based. `--in-waif` keeps only strings inside a waif of that class or a descendant |
 | `children REF [-r]`, `contents REF [-r]` | direct or recursive children / contents; `--summary [--format json]` measures the whole reachable graph |
 | `players` | player objects and their flags |
-| `tasks [-v]` | queued, suspended and interrupted tasks: id, due time (UTC) and frame; `-v` shows the whole stack |
+| `tasks [-v] [--summary]` | queued, suspended and interrupted tasks: id, due time (UTC) and frame; `-v` shows the whole stack. `--summary` counts them instead, by kind and by innermost `#DEFINER:verb`, most first: `moodb --db mongoose.db tasks --summary` prints `5 tasks: 1 queued, 3 suspended, 1 interrupted`, then lines such as `     3  #20:wait` |
 | `batch [QUERY...]` | the answers to several of the commands above, in one run |
 | `graph outgoing REF`, `graph incoming REF` | typed property relationships with exact stored-slot evidence; incoming scans the whole snapshot once |
 | `graph neighborhood REF`, `graph path SOURCE TARGET` | bounded relationships and shortest directed paths, with explicit coverage and truncation |
