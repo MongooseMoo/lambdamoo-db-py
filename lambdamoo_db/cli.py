@@ -18,6 +18,8 @@ from .inspection import (
     all_objects,
     all_properties,
     answers_call,
+    builtin_call_summary,
+    builtin_calls,
     builtin_value,
     clusters,
     code_fingerprint,
@@ -1248,6 +1250,51 @@ def grep(ctx: click.Context, pattern: str, objs: tuple[str, ...], ignore_case: b
                                "truncated": len(records) < counts["matched_verbs"], "verbs": records}))
     if output_format == "text" and (summary or limit is not None or offset):
         click.echo(f"{counts['matched_lines']} matching lines in {counts['matched_verbs']} verbs on {counts['matched_objects']} objects")
+
+
+@moodb.command("builtins")
+@click.argument("names", nargs=-1)
+@click.option("--against", "against", type=click.Path(exists=True, dir_okay=False), metavar="FILE",
+              help="Builtin names a server has, one per line; report only the called names missing from it.")
+@click.option("--sites", is_flag=True, help="List every call site.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.pass_context
+def builtins_command(ctx: click.Context, names: tuple[str, ...], against: str | None, sites: bool, output_format: str) -> None:
+    """Builtin functions the verb code calls: sites, verbs, objects, argument counts.
+
+    \b
+    Counts `name(...)`, `call_function("name", ...)` with a literal name, and
+    `X:bf_name(...)` where bf_name is a wrapper verb on #0 or its ancestors.
+    ARGS is the number of arguments written; `2@` means one was a @ splice.
+    NAMES limits the report to those builtins.
+    """
+    known = None
+    if against is not None:
+        known = {line.strip().lower() for line in Path(against).read_text(encoding="utf-8").splitlines() if line.strip()}
+    wanted = {n.lower() for n in names}
+    db, _ = _db(ctx)
+    records = builtin_call_summary((c for c in builtin_calls(db) if not wanted or c.name in wanted), sites=sites)
+    called = len(records)
+    if known is not None:
+        records = [r for r in records if r["name"] not in known]
+    if output_format == "json":
+        data = {"called": called, "sites": sum(r["sites"] for r in records), "builtins": records}
+        if known is not None:
+            data = {"against": against, "known": len(known), **data, "missing": len(records)}
+        click.echo(json.dumps(data))
+        return
+    for r in records:
+        arg_counts = " ".join(f"{k}:{v}" for k, v in r["arg_counts"].items())
+        via = " ".join(f"{k}:{v}" for k, v in r["via"].items())
+        click.echo(f"{r['name']}  {r['sites']} sites in {r['verbs']} verbs on {r['objects']} objects  args {arg_counts}  via {via}")
+        for c in r.get("calls", []):
+            notes = "".join(f"  {note}" for note, on in (("via " + c["via"], c["via"] != "direct"),
+                                                          ("in bf_ wrapper", c["in_wrapper"])) if on)
+            click.echo(f"  #{c['object']}:[{c['index']}] {(c['verb'].split() or [''])[0]}:{c['line']}  args {c['args']}{notes}")
+    if known is not None:
+        click.echo(f"{len(records)} of {called} called builtins are not in {against}")
+    else:
+        click.echo(f"{called} builtins called at {sum(r['sites'] for r in records)} sites")
 
 
 @moodb.command()
