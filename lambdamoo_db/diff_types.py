@@ -196,6 +196,13 @@ def finalize_counts(comparison: Comparison):
     footer['changed_entities'] = len({(e['entity']['type'], e['entity']['id']) for e in comparison.events if e['definite_change']})
     footer['counts_by_category'] = {c: sum(e['category'] == c and e['definite_change'] for e in comparison.events) for c in CATEGORIES}
     footer['counts_by_kind'] = {k: sum(e['kind'] == k for e in comparison.events) for k in KINDS}
+    # A saved task's changes split into what the task is and what only one
+    # server's virtual machine keeps; a round trip through another server is
+    # judged on 'task'. 'other' holds the rest of the runtime section
+    # (pending values, connections, clocks) and concealed events.
+    parts = [e.get('details', {}).get('part') for e in comparison.events if e['section'] == 'runtime' and e['definite_change']]
+    footer['runtime_changes'] = {'task': parts.count('task'), 'vm_private': parts.count('vm_private'),
+                                 'other': sum(p not in ('task', 'vm_private') for p in parts)}
     footer['added_source_lines'] = sum(e.get('details', {}).get('added_lines', 0) for e in comparison.events)
     footer['removed_source_lines'] = sum(e.get('details', {}).get('removed_lines', 0) for e in comparison.events)
     # Callers apply kind/display limits after comparison or redaction. Never

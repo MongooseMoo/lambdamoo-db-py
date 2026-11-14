@@ -622,6 +622,39 @@ FIELD_COVERAGE = {
 }
 
 
+# Saved task fields that belong to one server's virtual machine or are fixed
+# filler, not to what the task is. ToastStunt's write_activ/write_activ_as_pi
+# (src/execute.cc) writes: the operand stack, a dummy -111 (temp_value), the
+# scratch slot a.temp (temp_end), pc/bi_func_pc/error_pc, the builtin's
+# continuation, the compiler's language version, constants -7 -8 -9 -10 and
+# "No" "More" "Parse" "Infos". The VM header's top/vector/func_id/max indexes
+# that server's own frames and bytecode vectors. Another server that keeps
+# the same task writes its own values here. Everything else (id, start time,
+# this, player, programmer, verb, source, variables, task-local value, resume
+# value, status) is what the task is.
+VM_PRIVATE_FIELDS = {
+    Activation: frozenset(('stack', 'temp_value', 'temp_end', 'pc', 'bi_func', 'error', 'bi_func_name', 'bi_func_data',
+                           'language_version', 'unused1', 'unused2', 'unused3', 'unused4',
+                           'argstr', 'dobjstr', 'prepstr', 'iobjstr')),
+    VM: frozenset(('top', 'vector', 'funcId', 'maxStackframes')),
+    QueuedTask: frozenset(('unused',)),
+}
+TASK_FIELDS = ('queuedTasks', 'suspendedTasks', 'interruptedTasks')
+
+
+def whitespace_difference(old: str, new: str, name: bool = False) -> str | None:
+    """Name a string difference that is only whitespace a reader may drop.
+
+    A trailing carriage return on any string; leading or trailing whitespace
+    only on an object or verb name, where it is what a trimming reader loses.
+    """
+    if old.rstrip('\r') == new.rstrip('\r'):
+        return 'trailing carriage return'
+    if name and old.strip() == new.strip():
+        return 'leading or trailing whitespace'
+    return None
+
+
 def verify_field_coverage():
     for cls, fields in FIELD_COVERAGE.items():
         actual = {f.name for f in attrs.fields(cls)}
@@ -832,6 +865,7 @@ class _SnapshotComparison:
         self.key_certificates = {}
         self.layouts = {}
         self.reached = {'old': set(), 'new': set()}
+        self.task_pairing = {}
         permanent = {n for database in (old, new) for n, o in database.objects.items() if not o.anon}
         if options.object_ids is not None:
             for n in options.object_ids:
@@ -1044,7 +1078,54 @@ class _SnapshotComparison:
                            op + [_field(f.name)], np + [_field(f.name)], details)
             return
         if canonical_json(encode_value(a)) != canonical_json(encode_value(b)):
+            if isinstance(a, str):
+                name = bool(op) and op[-1] == _field('name') and (details or {}).get('subtype') in ('object_field', 'verb_metadata')
+                label = whitespace_difference(a, b, name)
+                if label:
+                    details = {**(details or {}), 'whitespace': label}
             self.emit(entity, category, section, op, np, a, b, details=details)
+
+    def tasks(self, field):
+        """Pair the saved tasks of one list by task id, not by position."""
+        entity = {'type': 'global', 'id': 'database'}
+        before, after = getattr(self.old, field), getattr(self.new, field)
+        old_ids, new_ids = [task.id for task in before], [task.id for task in after]
+        repeated = [side for side, ids in (('old', old_ids), ('new', new_ids)) if len(ids) != len(set(ids))]
+        if repeated:
+            self.error('repeated task id; tasks compared by position', field=field, sides=repeated)
+            self.value(before, after, entity, 'runtime', 'runtime', [_field(field)], [_field(field)])
+            return
+        old_by, new_by = dict(zip(old_ids, before)), dict(zip(new_ids, after))
+        self.task_pairing[field] = {'matched': len(old_by.keys() & new_by.keys()), 'old_only': len(old_by.keys() - new_by.keys()),
+                                    'new_only': len(new_by.keys() - old_by.keys())}
+        for task_id in sorted(old_by.keys() | new_by.keys()):
+            path = [_field(field), {'type': 'task', 'id': str(task_id)}]
+            a, b = old_by.get(task_id, MISSING), new_by.get(task_id, MISSING)
+            if a is MISSING or b is MISSING:
+                self.value(a, b, entity, 'runtime', 'runtime', path, path, {'part': 'task'})
+            else:
+                self.task_fields(a, b, entity, path)
+        survivors = old_by.keys() & new_by.keys()
+        if [i for i in old_ids if i in survivors] != [i for i in new_ids if i in survivors]:
+            self.emit(entity, 'serialization', 'serialization', [_field(field)], [_field(field)], old_ids, new_ids,
+                      'order_changed', details={'subtype': 'task_order'})
+
+    def task_fields(self, a, b, entity, path):
+        """Compare one task's records, each field labelled task or vm_private."""
+        private = VM_PRIVATE_FIELDS.get(type(a), frozenset())
+        for f in attrs.fields(type(a)):
+            av, bv = getattr(a, f.name, UNSET), getattr(b, f.name, UNSET)
+            step = path + [_field(f.name)]
+            if f.name in private:
+                self.value(av, bv, entity, 'runtime', 'runtime', step, step, {'part': 'vm_private'})
+            elif type(av) is type(bv) and type(av) in (VM, Activation):
+                self.task_fields(av, bv, entity, step)
+            elif (type(a) is VM and f.name == 'stack' and len(av) == len(bv)
+                  and all(type(x) is Activation and type(y) is Activation for x, y in zip(av, bv))):
+                for i, (x, y) in enumerate(zip(av, bv)):
+                    self.task_fields(x, y, entity, step + [_index(i)])
+            else:
+                self.value(av, bv, entity, 'runtime', 'runtime', step, step, {'part': 'task'})
 
     def layout(self, database, obj):
         cache_key = (id(database), obj.id)
@@ -1348,7 +1429,10 @@ class _SnapshotComparison:
             seen = Counter(); result = {}
             for i, v in enumerate(o.verbs):
                 signature = verb_signature(v)
-                base = signature if self.options.view != 'checkpoint' else (i,)
+                # Pair a verb whose name differs only by surrounding
+                # whitespace with itself, so that difference shows as a name
+                # change rather than a removed and an added verb.
+                base = (signature[0].strip(), *signature[1:]) if self.options.view != 'checkpoint' else (i,)
                 key = (*base, seen[base]); seen[base] += 1
                 step = {'type': 'verb', 'slot': str(i), 'name': v.name, 'occurrence': str(key[-1]),
                         'signature': {'name': signature[0], 'dobj': str(signature[1]), 'prep': str(signature[2]), 'iobj': str(signature[3])}}
@@ -1676,7 +1760,9 @@ class _SnapshotComparison:
                 if 'heap' in self.sections:
                     self.heap()
                 for field, section in FIELD_COVERAGE[MooDatabase].items():
-                    if section in ('runtime', 'serialization') and section in self.sections:
+                    if field in TASK_FIELDS and 'runtime' in self.sections:
+                        self.tasks(field)
+                    elif section in ('runtime', 'serialization') and section in self.sections:
                         self.value(getattr(self.old, field, UNSET), getattr(self.new, field, UNSET),
                                    {'type': 'global', 'id': 'database'}, section, section, [_field(field)], [_field(field)])
         except _Stopped:
@@ -1698,6 +1784,7 @@ class _SnapshotComparison:
         footer = {'record': 'footer', 'scan_complete': self.scan_complete and not self.errors, 'identity_complete': self.identity_complete and not self.blocked,
                   'details_complete': self.scan_complete and not self.errors, 'payloads_complete': True,
                   'errors': self.errors, 'excluded_sections': excluded, 'heap_correspondence': correspondence,
+                  'task_pairing': self.task_pairing,
                   'orphan_heap_counts': {side: len(({('waif', number) for number in database.waifs} |
                                                {('anonymous', number) for number, obj in database.objects.items() if obj.anon}) - self.reached[side])
                                          for side, database in (('old', self.old), ('new', self.new))} if self.options.view != 'checkpoint' else {'old': 0, 'new': 0},

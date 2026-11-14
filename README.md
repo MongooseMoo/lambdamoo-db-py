@@ -583,6 +583,46 @@ from the same comparison; the `STATUS: bundle DIR` line then goes to standard
 error. Each keeps its own default limit and the bundle is written first, so a
 refused directory fails before any report is printed.
 
+### Comparing saved tasks across servers
+
+```sh
+moodb --db roundtrip.db diff original.db --view checkpoint --section runtime --max-events 0
+```
+
+Queued, suspended and interrupted tasks are paired by task id, so the same
+tasks saved in another order are not changes; a different order alone is one
+`serialization` `order_changed` event (`task_order`). A task on one side only
+is one `added` or `removed` event whose path ends in `{"type": "task", "id": N}`.
+
+Each task difference carries `part` in its evidence. `vm_private` is state only
+the server that wrote the dump can use: operand stack, program counters
+(`pc`, `bi_func`, `error`), the scratch slot (`temp_end`), the builtin's saved
+continuation, the language version, the VM header's `top`/`vector`/`funcId`/
+`maxStackframes`, and fields the server writes as constants (`temp_value`,
+`unused1`-`unused4`, `argstr`/`dobjstr`/`prepstr`/`iobjstr`, a queued task's
+`unused`). `task` is everything else: id, start time, this, player, programmer,
+verb, source, variables, task-local and resume values. The report's
+`Runtime changes:` line and the footer's `runtime_changes` count both; a dump
+loaded and saved again by a different server keeps its tasks when `task` is 0.
+`Tasks paired by id:` (footer `task_pairing`) counts matched and one-sided tasks
+per list. Two hourly checkpoints of one live server, an hour apart, gave:
+
+```
+Runtime changes: {"other":2,"task":85,"vm_private":0}
+Tasks paired by id: {"interruptedTasks":{"matched":2,"new_only":0,"old_only":0},"queuedTasks":{"matched":59,"new_only":34,"old_only":36},"suspendedTasks":{"matched":1,"new_only":9,"old_only":2}}
+```
+
+`other` is the rest of the runtime section (pending values, connections,
+clocks) and any event concealed by `--redact`.
+
+A string that differs only by a trailing carriage return carries
+`"whitespace": "trailing carriage return"`, and an object or verb name that
+differs only by leading or trailing whitespace carries
+`"whitespace": "leading or trailing whitespace"`; in the `world` view such a
+verb stays one verb with a changed name. An LF dump keeps a carriage return
+that ends a value (only a CRLF dump's line ending is removed), so such a
+difference is visible and written back unchanged.
+
 ### Reading the verb changes as source
 
 ```sh
