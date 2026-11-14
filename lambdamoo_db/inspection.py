@@ -876,6 +876,22 @@ def frame_text(a: Activation) -> str:
     return f"#{a.vloc}:{a.verb} (this #{a.this}, player #{a.player})"
 
 
+TASK_KINDS = ("queued", "suspended", "interrupted")
+
+
+@attrs.frozen
+class TaskSummary:
+    kinds: dict[str, int]  # every one of TASK_KINDS, zero included
+    verbs: list[tuple[str, int]]  # innermost frame as #DEFINER:verb, most tasks first
+
+
+def task_summary(infos: Sequence[TaskInfo]) -> TaskSummary:
+    """Count ``infos`` by kind (an interrupted task's status is dropped) and by innermost verb."""
+    kinds = Counter(t.kind.split(" ", 1)[0] for t in infos)
+    verbs = Counter(f"#{t.frames[-1].vloc}:{t.frames[-1].verb}" if t.frames else "(no frames)" for t in infos)
+    return TaskSummary({k: kinds[k] for k in TASK_KINDS}, sorted(verbs.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # suspend() with no timeout: the server stores INTNUM_MAX (toaststunt tasks.cc bf_suspend).
 INDEFINITE_SUSPEND = 2**63 - 1
