@@ -25,6 +25,9 @@ Done on branch `tasks-summary`, local commits only (no push, no PR).
 - An interrupted task's status (`interrupted (<status>)`) is dropped from the
   kind count: the request was three kinds. All three are always printed, zero
   included.
+- Each verb row shows its total and its count per kind (lead's request, so the
+  suspended and interrupted tasks' verbs are read from the summary itself);
+  `TaskSummary.verbs` holds a per-kind dict for each verb.
 - `--summary` filters by `--this` first, since it reuses the listing's
   selection; no other option added.
 
