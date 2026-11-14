@@ -9,7 +9,7 @@ checkpoint cannot yet hand back to Toast, so we need to see which a dump holds.
 
 ## State
 
-Done on branch `tasks-summary`, local commits only (no push, no PR).
+Done on branch `tasks-summary`; pull request open.
 
 - API: `inspection.task_summary(infos) -> TaskSummary(kinds, verbs)`, over the
   existing `inspection.tasks(db)` records.
@@ -40,4 +40,4 @@ Done on branch `tasks-summary`, local commits only (no push, no PR).
 
 ## Next step
 
-Push and PR when the lead/Q asks.
+CI on the pull request.
