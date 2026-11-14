@@ -43,6 +43,7 @@ from .inspection import (
     resolve_object,
     split_ref,
     stored_properties,
+    task_summary,
     tasks as list_tasks,
     tree_summary,
     value_holders,
@@ -1612,8 +1613,10 @@ def players(ctx: click.Context) -> None:
 @click.option("-v", "--verbose", is_flag=True, help="Show every stack frame, outermost first.")
 @click.option("--this", "receivers", multiple=True,
               help="Only tasks with a frame whose this is this object (repeatable).")
+@click.option("--summary", is_flag=True,
+              help="Count the tasks by kind and by innermost #DEFINER:verb instead of listing them.")
 @click.pass_context
-def tasks(ctx: click.Context, verbose: bool, receivers: tuple[str, ...]) -> None:
+def tasks(ctx: click.Context, verbose: bool, receivers: tuple[str, ...], summary: bool) -> None:
     """List queued (forked), suspended and interrupted tasks saved in the dump.
 
     Each line shows the task id, when it is due to run (UTC), and its
@@ -1621,9 +1624,17 @@ def tasks(ctx: click.Context, verbose: bool, receivers: tuple[str, ...]) -> None
     """
     db, _ = _db(ctx)
     wanted = {_object(db, ref).id for ref in receivers}
-    for t in list_tasks(db):
-        if wanted and not any(a.this in wanted for a in t.frames):
-            continue
+    chosen = [t for t in list_tasks(db) if not wanted or any(a.this in wanted for a in t.frames)]
+    if summary:
+        counts = task_summary(chosen)
+        click.echo(f"{len(chosen)} tasks: " + ", ".join(f"{n} {k}" for k, n in counts.kinds.items()))
+        if counts.verbs:
+            click.echo(" total  " + "  ".join(counts.kinds) + "  verb")
+        for verb, by_kind in counts.verbs:
+            cells = "  ".join(f"{by_kind[k]:{len(k)}}" for k in counts.kinds)
+            click.echo(f"{sum(by_kind.values()):6}  {cells}  {verb}")
+        return
+    for t in chosen:
         top = frame_text(t.frames[-1]) if t.frames else "(no frames)"
         more = f"  (+{len(t.frames) - 1} frames)" if len(t.frames) > 1 and not verbose else ""
         click.echo(f"{t.kind} {t.id}  {format_time(t.when)}  {top}{more}")
