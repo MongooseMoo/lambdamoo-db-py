@@ -26,6 +26,10 @@ from .inspection import (
     dollar_names,
     find_references,
     find_slot,
+    CATALOG_ID_KINDS,
+    CATALOG_REF_KINDS,
+    find_catalog_refs,
+    find_code_literals,
     find_strings,
     find_verb,
     format_time,
@@ -1549,6 +1553,110 @@ def values(ctx: click.Context, pattern: str, ignore_case: bool, fixed_strings: b
         if wanted is not None and not wanted.intersection(hit.waif_classes):
             continue
         click.echo(f"{label(db, hit.obj.id, names)}{hit.where} = {moo_string(hit.value)}")
+
+
+def _system_object(db, name: str) -> int | None:
+    """``$name``'s object number, or None when #0 has no such object-valued property."""
+    if find_slot(db, db.objects[0], name) is None:
+        return None
+    value = lookup_property(db, db.objects[0], name).value
+    return int(value) if isinstance(value, ObjNum) else None
+
+
+def _read_ids(path: str) -> set[tuple[str, int | str]]:
+    """``kind<TAB>value`` lines; value is an integer, or the string itself for path and slice."""
+    ids: set[tuple[str, int | str]] = set()
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        kind, _, value = line.partition("\t")
+        if kind not in CATALOG_ID_KINDS or not value:
+            raise click.BadParameter(f"line {n}: expected KIND<TAB>VALUE with KIND one of {', '.join(CATALOG_ID_KINDS)}", param_hint="--ids")
+        if kind in ("path", "slice"):
+            ids.add((kind, value))
+        elif value.isdigit():
+            ids.add((kind, int(value)))
+        else:
+            raise click.BadParameter(f"line {n}: {kind} value {value!r} is not an integer", param_hint="--ids")
+    return ids
+
+
+@moodb.command("sound-refs")
+@click.option("--kind", "kinds", multiple=True, type=click.Choice(CATALOG_REF_KINDS), help="Only references of this kind (repeatable).")
+@click.option("--ids", "ids_file", type=click.Path(exists=True, dir_okay=False),
+              help="File of KIND<TAB>VALUE lines: print only those references; exit 1 if any is found, 0 if none.")
+@click.option("--skip", multiple=True, metavar="GLOB", help="Do not enter properties or waif slots with a matching name (repeatable); counted on stderr.")
+@click.option("--code", is_flag=True, help="Also report verb code lines with an --ids integer or path/slice as a literal (needs --ids).")
+@click.option("--summary", is_flag=True, help="Counts by kind and context, distinct values per kind, and by property name, instead of lines.")
+@click.option("--format", "output_format", type=click.Choice(["text", "jsonl"]), default="text", show_default=True)
+@click.pass_context
+def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None, skip: tuple[str, ...], code: bool,
+               summary: bool, output_format: str) -> None:
+    """Stored sound catalog references: sound, group, content, asset and segment ids, paths and slice names.
+
+    Follows the game's grammar of a sound value (#2585:_snd_candidates): one
+    entry or a list of them, each an INT > 0 (sound id), a STR, or a map with
+    one of "group" and "sound". Where a sound value is looked for:
+
+    \b
+    - properties and waif slots named *_snd (any case);
+    - on $social, each social's ["sound"] and ["sounds"][form];
+    - anywhere, a map whose keys are all group/sound/volume/gain_db/vary/
+      normalize/modifiers and that holds an INT group or sound (snd-map);
+    - in $catalog_sound waifs, sound_id, content_id, asset_id, segment_id and
+      variation_group_id (an object number there is unset);
+    - anywhere, a string ending .m4a .ogg .wav .mp3 .flac .aif(f) .opus, a
+      slice when followed by #N.
+
+    \b
+    It cannot see: the live game after this dump (take a fresh checkpoint);
+    values built at run time; bare integers in properties not named *_snd
+    and outside those map shapes (verb literals with --code); values in
+    suspended task frames.
+    """
+    if code and ids_file is None:
+        raise click.UsageError("--code needs --ids: without an id set every number in code would match")
+    ids = _read_ids(ids_file) if ids_file else None
+    db, names = _db(ctx)
+    skipped: Counter = Counter()
+    found = list(find_catalog_refs(db, _system_object(db, "catalog_sound"), _system_object(db, "social"), skip, skipped))
+    if ids is not None:
+        found = [r for r in found if (r.kind, r.value) in ids]
+    if code:
+        found += find_code_literals(db, {v for _, v in ids if isinstance(v, int)}, {v for _, v in ids if isinstance(v, str)})
+    if kinds:
+        found = [r for r in found if r.kind in kinds]
+    if summary:
+        _sound_refs_summary(found, skipped)
+    else:
+        for r in found:
+            if output_format == "jsonl":
+                click.echo(json.dumps({"obj": r.obj.id, "where": r.where, "kind": r.kind, "value": r.value, "context": r.context}))
+            else:
+                value = moo_string(r.value) if isinstance(r.value, str) else str(r.value)
+                click.echo(f"{label(db, r.obj.id, names)}{r.where}  {r.kind}  {value}  {r.context}")
+        for name, n in sorted(skipped.items()):
+            click.echo(f"skipped {name} {n}", err=True)
+    if ids is not None and found:
+        ctx.exit(1)
+
+
+def _sound_refs_summary(found: list, skipped: Counter) -> None:
+    click.echo("by kind and context")
+    for (kind, context), n in sorted(Counter((r.kind, r.context) for r in found).items(), key=lambda kv: (CATALOG_REF_KINDS.index(kv[0][0]), kv[0][1])):
+        click.echo(f"  {kind}  {context}  {n}")
+    click.echo("distinct values by kind")
+    for kind in CATALOG_REF_KINDS:
+        distinct = {r.value for r in found if r.kind == kind}
+        if distinct:
+            click.echo(f"  {kind}  {len(distinct)}")
+    click.echo("by property (top 40)")
+    for name, n in Counter(r.holder for r in found).most_common(40):
+        click.echo(f"  {name}  {n}")
+    if skipped:
+        click.echo("skipped properties")
+        for name, n in sorted(skipped.items()):
+            click.echo(f"  {name}  {n}")
 
 
 def _tree(ctx: click.Context, ref: str, field: str, recursive: bool, summary: bool, output_format: str) -> None:
