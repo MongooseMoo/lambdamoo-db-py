@@ -130,6 +130,25 @@ def test_cli_ids_file_selects_references_and_sets_the_exit_status(monkeypatch, t
     assert run(monkeypatch, tmp_path, "--ids", str(ids)).exit_code == 2
 
 
+def test_cli_ids_match_paths_and_slices_as_the_game_resolves_them(monkeypatch, tmp_path):
+    # #6128:resolve looks a string up URL-decoded and lowercased, and accepts a slice number with or without leading zeros.
+    db = sound_db()
+    held = db.objects[2]
+    held.properties[1].value = [{"group": 7}, "A.M4A#2"]
+    held.properties[5].value = "Doors/Creak%20Slow.OGG"
+    held.verbs[0].code = ['x = "A.m4a#002";', 'y = "b.m4a#02";']
+    monkeypatch.setattr(cli, "_db", lambda _: (db, {}))
+    ids = tmp_path / "ids.tsv"
+    ids.write_text("slice\ta.m4a#02\npath\tdoors/creak slow.ogg\n")
+    r = CliRunner().invoke(cli.moodb, ["sound-refs", "--ids", str(ids), "--code"])
+    assert r.exit_code == 1, r.output
+    assert r.output.splitlines() == [
+        '#2 "obj2".y_snd[2]  slice  "A.M4A#2"  string',
+        '#2 "obj2".path_note  path  "Doors/Creak%20Slow.OGG"  string',
+        '#2 "obj2":[0] play:1  code  "A.m4a#002"  code',
+    ]
+
+
 def test_cli_code_reports_listed_literals_in_verb_code(monkeypatch, tmp_path):
     assert run(monkeypatch, tmp_path, "--code").exit_code == 2
     ids = tmp_path / "ids.tsv"

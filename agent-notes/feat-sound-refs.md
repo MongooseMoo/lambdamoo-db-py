@@ -17,7 +17,7 @@
 - All ids must be INT > 0. The game skips sound 0 and has no group 0; object numbers in `$catalog_sound` slots are their unset default `#-1`.
 - `CatalogRef.holder` (innermost property or slot name) exists for `--summary`'s per-property count; parsing it from `where` would break on map keys holding dots.
 - `--skip` applies to property names and waif slot names: the pick memory `last_sound_picks` is a waif slot (`#2585:pick_value:11`). Skipped names are counted on stderr, or in the summary.
-- `--code` ignores `#N` and decimals; it reports a string literal only when it equals a listed path or slice exactly.
+- `--code` ignores `#N` and decimals; it reports a string literal only when it is a listed path or slice, compared as the game resolves names (see `fix-sound-refs-path-case.md`).
 - Text lines start with `label()` like `values`, so they carry the `$name` and object name.
 
 ## Surprises
