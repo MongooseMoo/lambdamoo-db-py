@@ -17,11 +17,12 @@ missing from a server's list. Requested for the Toast-to-Barn switch (hub report
   in `lambdamoo_db/cli.py`.
 - Tests `tests/test_builtins_cli.py` (synthetic fixtures), README section
   "Builtins the code calls" and a row in the command table.
-- Local commits only; not pushed, no PR.
+- Pull request open.
 - Run on the 2026-11-12T0055 Mongoose dump: 223 distinct builtins at 139846
   sites, 2m45s including the index build. Its counts for the fork builtins and
   the 2-argument `valid` match the earlier one-off grep in the hub report.
-  `--against` Barn's 260 catalog names: 14 missing, 6 fork builtins plus 8 old
+  `--against` Barn's 260 catalog names (Barn master of 2026-11-13, before it
+  gained `validate_string_lines` and `waif_owner_count`): 14 missing, 6 fork builtins plus 8 old
   FUP/LambdaMOO names reached through `call_function` that Toast lacks too.
   Results are in the hub's `reports/barn-switch-work-02-moodb-builtins-2026-11-13.md`.
 
@@ -46,9 +47,10 @@ missing from a server's list. Requested for the Toast-to-Barn switch (hub report
   `fileread`, `tonum`, `us_time`). Checking literal `call_function` names is
   what finds them.
 - The `args` column finds argument-count errors too: the one `random` site
-  with 12 arguments (`#1652:[11]` line 16) was checked in its source and is a real
+  with 12 arguments was checked in its source and is a real
   12-argument call (an E_ARGS error on any server), not a miscount.
 
 ## Next step
 
-Push and PR when Q approves.
+CI on the pull request. Not built: a filter on argument count (wanted when
+looking for one site by its count).
