@@ -70,6 +70,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `code SPEC... [-n]` | verb source as `@program` blocks; a bare REF prints all of its verbs; `-n` numbers lines |
 | `prop SPEC... [--full]` | effective property values as MOO literals, naming the definer when inherited |
 | `grep PATTERN [-o REF] [-i] [-F] [-l] [-C N]` | Python regex over all verb code; `-o` limits to objects, `-l` lists verbs once, `-C` adds context |
+| `builtins [NAME...] [--against FILE] [--sites] [--format json]` | every builtin function the verb code calls, with sites, verbs, objects and argument counts; `--against` keeps only names missing from a server's list (see "Builtins the code calls") |
 | `added OLD [PATTERN] [-i] [-F] [-l]` | added or replaced verb code lines relative to OLD; optional Python regex, `-F` for literal text, `-l` for counts per verb |
 | `find TEXT` | objects whose name or `$name` contains TEXT |
 | `find --verb NAME` | objects defining a verb that a call to NAME would match, waif class verbs (stored as `:NAME`) included |
@@ -452,6 +453,41 @@ matching lines, and names the ones kept on their number:
 ```text
 --existing left out 20 objects OLD lacks and 54 reused numbers; kept 3 on number alone (no .creation_time to compare): #1641 #9657 #22617
 ```
+
+### Builtins the code calls
+
+`builtins` lists every builtin function called in verb code, to check a dump
+against a server's builtin registry before moving it to that server:
+
+```sh
+moodb builtins                                 # every builtin called, in name order
+moodb builtins valid spellcheck --sites        # only these, with each call site
+moodb builtins --against barn-names.txt --sites --format json
+```
+
+```text
+valid  3 sites in 2 verbs on 2 objects  args 1:1 1@:1 2:1  via bf_wrapper:1 direct:2
+  #5:[0] bf_valid:1  args 1@  in bf_ wrapper
+  #10:[0] check:1  args 2
+  #10:[0] check:2  args 1  via bf_wrapper
+```
+
+It reads the code with a MOO tokenizer, not a regex: a call is an identifier
+followed by `(`, so verb calls (`x:name(`, `$name(`), property names, string
+contents, keywords and the labels in `while NAME (`, `fork NAME (` and
+`except NAME (` are not counted. Three routes count as a call of a builtin:
+`name(...)` (`direct`), `call_function("name", ...)` with a literal name
+(`call_function`, besides the call of `call_function` itself), and
+`X:bf_name(...)` where `bf_name` is a verb on `#0` or one of its ancestors, the
+wrappers the server calls for protected builtins (`bf_wrapper`). Calls made
+inside such a wrapper are marked `in bf_ wrapper`. `args` counts the argument
+expressions written; `2@` means one of them was a `@` splice, so the real
+number is known only when it runs. Names are compared case-insensitively.
+
+`--against FILE` takes builtin names one per line (blank lines skipped), for
+example the names a server registers, and reports only the called builtins
+missing from it. JSON then adds `against`, `known` and `missing`; `called` is
+the number of distinct builtins called and `sites` the sites of those listed.
 
 ### Comparing property definitions
 
