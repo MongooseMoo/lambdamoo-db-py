@@ -47,7 +47,7 @@ def test_call_function_with_a_literal_name_counts_the_named_builtin():
 
 
 def test_bf_wrapper_verb_calls_count_only_for_known_wrappers():
-    assert calls('$bf_layer:bf_valid(o);', '#0:BF_VALID(o, i);', 'x:bf_unknown(1);', wrappers={'valid'}) == [
+    assert calls('$wrappers:bf_valid(o);', '#0:BF_VALID(o, i);', 'x:bf_unknown(1);', wrappers={'valid'}) == [
         ('valid', 1, '1', 'bf_wrapper'), ('valid', 2, '2', 'bf_wrapper')]
 
 
