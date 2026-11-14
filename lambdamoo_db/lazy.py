@@ -215,7 +215,7 @@ class LazyDatabase(MooDatabase):
             yield read
 
     def _reader(self, start: int, end: int, read: Callable[[int, int], bytes] | None = None) -> Reader:
-        return Reader(_LineSource((read or self._read)(start, end)), str(self.path))  # type: ignore[arg-type]
+        return Reader(_LineSource((read or self._read)(start, end), self.line_ending == '\r\n'), str(self.path))  # type: ignore[arg-type]
 
     def object_names(self) -> dict[int, str]:
         return self.index.names

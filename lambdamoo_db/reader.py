@@ -37,10 +37,17 @@ def load(filename: str) -> MooDatabase:
 
 
 class _LineSource:
-    """Immutable Latin-1, LF-delimited bytes with offsets for split/index readers."""
+    """Immutable Latin-1, LF-delimited bytes with offsets for split/index readers.
 
-    def __init__(self, data: bytes) -> None:
+    A value line loses its CR before the LF only in a CRLF dump: in an LF dump
+    (what the server writes) that CR is the last character of the value.
+    ``crlf`` defaults to the line ending judged from ``data``'s first bytes; a
+    reader of one span of a dump passes the whole dump's.
+    """
+
+    def __init__(self, data: bytes, crlf: bool | None = None) -> None:
         self.data = bytes(data)
+        self._crlf = detect_line_ending(self.data[:1000]) == '\r\n' if crlf is None else crlf
         source = BytesIO(self.data)
         self._readline = source.readline
         self._tell = source.tell
@@ -71,7 +78,7 @@ class _LineSource:
             return None
         if line.endswith(b"\n"):
             line = line[:-1]
-            if line.endswith(b"\r"):
+            if self._crlf and line.endswith(b"\r"):
                 line = line[:-1]
         return line.decode("latin-1")
 
@@ -90,8 +97,13 @@ def load_bytes(data: bytes, filename: str = "<bytes>") -> MooDatabase:
 
 
 def detect_line_ending(chunk: bytes) -> str:
-    """The line ending used by a dump, judged from its first bytes."""
-    return '\r\n' if b'\r\n' in chunk else '\n'
+    """The line ending used by a dump, judged from its first line.
+
+    The version line never ends in a carriage return of its own; a string
+    value further on may, and must not make an LF dump look like CRLF.
+    """
+    end = chunk.find(b'\n')
+    return '\r\n' if end > 0 and chunk[end - 1:end] == b'\r' else '\n'
 
 
 def compile_re(template: str) -> Pattern[str]:
