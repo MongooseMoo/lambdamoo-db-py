@@ -882,14 +882,20 @@ TASK_KINDS = ("queued", "suspended", "interrupted")
 @attrs.frozen
 class TaskSummary:
     kinds: dict[str, int]  # every one of TASK_KINDS, zero included
-    verbs: list[tuple[str, int]]  # innermost frame as #DEFINER:verb, most tasks first
+    # innermost frame as #DEFINER:verb with its count per kind (every kind, zero included), most tasks first
+    verbs: list[tuple[str, dict[str, int]]]
 
 
 def task_summary(infos: Sequence[TaskInfo]) -> TaskSummary:
-    """Count ``infos`` by kind (an interrupted task's status is dropped) and by innermost verb."""
-    kinds = Counter(t.kind.split(" ", 1)[0] for t in infos)
-    verbs = Counter(f"#{t.frames[-1].vloc}:{t.frames[-1].verb}" if t.frames else "(no frames)" for t in infos)
-    return TaskSummary({k: kinds[k] for k in TASK_KINDS}, sorted(verbs.items(), key=lambda kv: (-kv[1], kv[0])))
+    """Count ``infos`` by kind (an interrupted task's status is dropped), and by innermost verb and kind."""
+    pairs = Counter(
+        (f"#{t.frames[-1].vloc}:{t.frames[-1].verb}" if t.frames else "(no frames)", t.kind.split(" ", 1)[0])
+        for t in infos
+    )
+    kinds = {k: sum(n for (_, kind), n in pairs.items() if kind == k) for k in TASK_KINDS}
+    verbs = {verb: {k: pairs[verb, k] for k in TASK_KINDS} for verb, _ in pairs}
+    ordered = sorted(verbs.items(), key=lambda kv: (-sum(kv[1].values()), kv[0]))
+    return TaskSummary(kinds, ordered)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)

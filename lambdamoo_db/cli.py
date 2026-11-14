@@ -1628,8 +1628,11 @@ def tasks(ctx: click.Context, verbose: bool, receivers: tuple[str, ...], summary
     if summary:
         counts = task_summary(chosen)
         click.echo(f"{len(chosen)} tasks: " + ", ".join(f"{n} {k}" for k, n in counts.kinds.items()))
-        for verb, n in counts.verbs:
-            click.echo(f"{n:6}  {verb}")
+        if counts.verbs:
+            click.echo(" total  " + "  ".join(counts.kinds) + "  verb")
+        for verb, by_kind in counts.verbs:
+            cells = "  ".join(f"{by_kind[k]:{len(k)}}" for k in counts.kinds)
+            click.echo(f"{sum(by_kind.values()):6}  {cells}  {verb}")
         return
     for t in chosen:
         top = frame_text(t.frames[-1]) if t.frames else "(no frames)"
