@@ -219,6 +219,9 @@ def render_text(comp, context=3):
         ('scan_complete', 'identity_complete', 'details_complete', 'payloads_complete', 'omitted_events')}),
         'Counts by category: ' + _preview(footer.get('counts_by_category', {})),
         'Counts by kind: ' + _preview(footer.get('counts_by_kind', {}))])
+    if 'runtime' in comp.header.get('sections', ()):
+        lines.append('Runtime changes: ' + _preview(footer.get('runtime_changes', {})))
+        lines.append('Tasks paired by id: ' + _preview(footer.get('task_pairing', {})))
     if footer.get('errors'):
         lines.append('Errors: ' + _preview(footer['errors']))
     return '\n'.join(lines) + '\n'
@@ -290,6 +293,8 @@ def _summary(comp, rows):
             'Excluded sections: ' + _markdown(_preview(comp.header.get('excluded_sections', []))), '',
             'Counts by category: ' + _markdown(_preview(footer.get('counts_by_category', {}))), '',
             'Counts by kind: ' + _markdown(_preview(footer.get('counts_by_kind', {}))), '',
+            *(['Runtime changes: ' + _markdown(_preview(footer.get('runtime_changes', {}))), '']
+              if 'runtime' in comp.header.get('sections', ()) else []),
             'Redactions: ' + _markdown(_preview(comp.header.get('redaction', {}))), '',
             'Redaction rule matches: ' + _markdown(_preview(footer.get('redaction_rules', []))), '',
             'Completeness and ambiguities: ' + _markdown(_preview({key: footer.get(key) for key in
