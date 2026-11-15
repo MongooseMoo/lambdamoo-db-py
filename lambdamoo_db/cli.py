@@ -1659,7 +1659,8 @@ def _sound_refs_summary(found: list, skipped: Counter) -> None:
             click.echo(f"  {name}  {n}")
 
 
-def _tree(ctx: click.Context, ref: str, field: str, recursive: bool, summary: bool, output_format: str) -> None:
+def _tree(ctx: click.Context, ref: str, field: str, recursive: bool, summary: bool, output_format: str,
+          ancestry: bool = False) -> None:
     if output_format == "json" and not summary:
         raise click.UsageError("--format json requires --summary")
     db, names = _db(ctx)
@@ -1679,7 +1680,13 @@ def _tree(ctx: click.Context, ref: str, field: str, recursive: bool, summary: bo
     else:
         found = [db.objects[int(c)] for c in getattr(o, field) if int(c) in db.objects]
     for c in found:
-        click.echo(label(db, c.id, names))
+        line = label(db, c.id, names)
+        if ancestry:
+            line += "".join(f"  < {label(db, a.id, names)}" for a in db.ancestors(c)[1:])
+        click.echo(line)
+
+
+_ANCESTRY_HELP = "After each object, its ancestors, nearest parent first."
 
 
 @moodb.command()
@@ -1688,10 +1695,11 @@ def _tree(ctx: click.Context, ref: str, field: str, recursive: bool, summary: bo
 @click.option("--summary", is_flag=True, help="Count the entire reachable graph; does not require -r.")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", show_default=True,
               help="Summary output format. JSON requires --summary.")
+@click.option("--ancestry", is_flag=True, help=_ANCESTRY_HELP)
 @click.pass_context
-def children(ctx: click.Context, ref: str, recursive: bool, summary: bool, output_format: str) -> None:
+def children(ctx: click.Context, ref: str, recursive: bool, summary: bool, output_format: str, ancestry: bool) -> None:
     """List an object's children."""
-    _tree(ctx, ref, "children", recursive, summary, output_format)
+    _tree(ctx, ref, "children", recursive, summary, output_format, ancestry)
 
 
 @moodb.command()
@@ -1700,10 +1708,11 @@ def children(ctx: click.Context, ref: str, recursive: bool, summary: bool, outpu
 @click.option("--summary", is_flag=True, help="Count the entire reachable graph; does not require -r.")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", show_default=True,
               help="Summary output format. JSON requires --summary.")
+@click.option("--ancestry", is_flag=True, help=_ANCESTRY_HELP)
 @click.pass_context
-def contents(ctx: click.Context, ref: str, recursive: bool, summary: bool, output_format: str) -> None:
+def contents(ctx: click.Context, ref: str, recursive: bool, summary: bool, output_format: str, ancestry: bool) -> None:
     """List what an object contains."""
-    _tree(ctx, ref, "contents", recursive, summary, output_format)
+    _tree(ctx, ref, "contents", recursive, summary, output_format, ancestry)
 
 
 @moodb.command()
