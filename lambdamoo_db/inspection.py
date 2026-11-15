@@ -16,6 +16,7 @@ from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from typing import Any, Callable, Iterator, NamedTuple, Sequence
+from urllib.parse import unquote
 
 import attrs
 
@@ -884,6 +885,17 @@ CATALOG_REF_KINDS = (*CATALOG_ID_KINDS, "code")
 _SOUND_FILE = re.compile(r"\.(m4a|ogg|wav|mp3|flac|aiff?|opus)(#\d+)?$", re.IGNORECASE)
 
 
+def catalog_name_key(name: str) -> str:
+    """One key for every spelling of a path or slice name the game resolves to the same catalog row.
+
+    ``#6128:resolve`` looks a string up URL-decoded, then lowercased as a sound
+    name, and accepts a slice number with or without leading zeros.
+    """
+    key = unquote(name).lower()
+    numbered = re.fullmatch(r"(.*)#0*(\d+)", key, re.DOTALL)
+    return f"{numbered[1]}#{numbered[2]}" if numbered else key
+
+
 @attrs.frozen
 class CatalogRef:
     obj: MooObject  # the object holding the reference (for kind code, the verb's object)
@@ -993,8 +1005,10 @@ def find_code_literals(db: MooDatabase, numbers: set[int], strings: set[str]) ->
     """Verb code lines holding one of ``numbers`` as an integer literal or one of ``strings`` as a string literal.
 
     Integers are read with string literals (comments included) masked, and
-    ``#N`` object numbers and decimals are not integers.
+    ``#N`` object numbers and decimals are not integers. Strings are compared
+    by ``catalog_name_key``.
     """
+    keys = {catalog_name_key(s) for s in strings}
     programs = db.objects_with_programs() if isinstance(db, LazyDatabase) else list(all_objects(db))
     for o in programs:
         for idx, v in enumerate(o.verbs):
@@ -1005,7 +1019,7 @@ def find_code_literals(db: MooDatabase, numbers: set[int], strings: set[str]) ->
                 for number in sorted({int(m) for m in _INT_LITERAL.findall(line)} & numbers):
                     yield CatalogRef(o, where, "code", number, "code", name)
                 literals = {re.sub(r"\\(.)", r"\1", m) for m in _STRING_LITERAL.findall(original[n - 1])}
-                for text in sorted(literals & strings):
+                for text in sorted(t for t in literals if catalog_name_key(t) in keys):
                     yield CatalogRef(o, where, "code", text, "code", name)
 
 

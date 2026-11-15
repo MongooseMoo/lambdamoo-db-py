@@ -18,6 +18,7 @@ from .inspection import (
     all_objects,
     all_properties,
     answers_call,
+    catalog_name_key,
     builtin_value,
     clusters,
     code_fingerprint,
@@ -1609,6 +1610,11 @@ def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None,
       slice when followed by #N.
 
     \b
+    --ids matches a path or slice name as the game resolves one
+    (#6128:resolve): ignoring case, URL-encoding and leading zeros of the
+    slice number.
+
+    \b
     It cannot see: the live game after this dump (take a fresh checkpoint);
     values built at run time; bare integers in properties not named *_snd
     and outside those map shapes (verb literals with --code); values in
@@ -1621,7 +1627,11 @@ def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None,
     skipped: Counter = Counter()
     found = list(find_catalog_refs(db, _system_object(db, "catalog_sound"), _system_object(db, "social"), skip, skipped))
     if ids is not None:
-        found = [r for r in found if (r.kind, r.value) in ids]
+        def key(value: int | str) -> int | str:
+            return catalog_name_key(value) if isinstance(value, str) else value
+
+        wanted = {(kind, key(value)) for kind, value in ids}
+        found = [r for r in found if (r.kind, key(r.value)) in wanted]
     if code:
         found += find_code_literals(db, {v for _, v in ids if isinstance(v, int)}, {v for _, v in ids if isinstance(v, str)})
     if kinds:
