@@ -162,6 +162,22 @@ def test_cli_code_reports_listed_literals_in_verb_code(monkeypatch, tmp_path):
     ]
 
 
+def test_cli_output_writes_the_lines_to_a_file_and_reports_the_count(monkeypatch, tmp_path):
+    ids = tmp_path / "ids.tsv"
+    ids.write_text("sound\t5\nslice\ta.m4a#02\n")
+    for args in (["--skip", "cache"], ["--kind", "group", "--format", "jsonl"], ["--summary", "--skip", "cache"],
+                 ["--ids", str(ids)]):
+        plain = run(monkeypatch, tmp_path, *args)
+        assert plain.stdout != ""
+        out = tmp_path / "refs.txt"
+        r = run(monkeypatch, tmp_path, *args, "--output", str(out))
+        # The same exit status and stderr; stdout holds only the count and the file.
+        assert (r.exit_code, r.stderr) == (plain.exit_code, plain.stderr), r.output
+        assert out.read_bytes() == plain.stdout.encode("utf-8")
+        assert b"\r" not in out.read_bytes()
+        assert r.stdout == f"{len(plain.stdout.splitlines())} lines: {out}\n"
+
+
 def test_cli_summary_counts_kinds_and_distinct_values(monkeypatch, tmp_path):
     r = run(monkeypatch, tmp_path, "--summary", "--skip", "cache")
     assert r.exit_code == 0, r.output
