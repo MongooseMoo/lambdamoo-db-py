@@ -1590,9 +1590,11 @@ def _read_ids(path: str) -> set[tuple[str, int | str]]:
 @click.option("--code", is_flag=True, help="Also report verb code lines with an --ids integer or path/slice as a literal (needs --ids).")
 @click.option("--summary", is_flag=True, help="Counts by kind and context, distinct values per kind, and by property name, instead of lines.")
 @click.option("--format", "output_format", type=click.Choice(["text", "jsonl"]), default="text", show_default=True)
+@click.option("--output", type=click.Path(dir_okay=False),
+              help="Write the lines to this file (UTF-8, replacing it) and print only their count and the file.")
 @click.pass_context
 def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None, skip: tuple[str, ...], code: bool,
-               summary: bool, output_format: str) -> None:
+               summary: bool, output_format: str, output: str | None) -> None:
     """Stored sound catalog references: sound, group, content, asset and segment ids, paths and slice names.
 
     Follows the game's grammar of a sound value (#2585:_snd_candidates): one
@@ -1637,36 +1639,45 @@ def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None,
     if kinds:
         found = [r for r in found if r.kind in kinds]
     if summary:
-        _sound_refs_summary(found, skipped)
+        lines = _sound_refs_summary(found, skipped)
     else:
+        lines = []
         for r in found:
             if output_format == "jsonl":
-                click.echo(json.dumps({"obj": r.obj.id, "where": r.where, "kind": r.kind, "value": r.value, "context": r.context}))
+                lines.append(json.dumps({"obj": r.obj.id, "where": r.where, "kind": r.kind, "value": r.value, "context": r.context}))
             else:
                 value = moo_string(r.value) if isinstance(r.value, str) else str(r.value)
-                click.echo(f"{label(db, r.obj.id, names)}{r.where}  {r.kind}  {value}  {r.context}")
+                lines.append(f"{label(db, r.obj.id, names)}{r.where}  {r.kind}  {value}  {r.context}")
+    if output:
+        Path(output).write_text("".join(line + "\n" for line in lines), encoding="utf-8", newline="\n")
+        click.echo(f"{len(lines)} lines: {output}")
+    else:
+        for line in lines:
+            click.echo(line)
+    if not summary:
         for name, n in sorted(skipped.items()):
             click.echo(f"skipped {name} {n}", err=True)
     if ids is not None and found:
         ctx.exit(1)
 
 
-def _sound_refs_summary(found: list, skipped: Counter) -> None:
-    click.echo("by kind and context")
+def _sound_refs_summary(found: list, skipped: Counter) -> list[str]:
+    lines = ["by kind and context"]
     for (kind, context), n in sorted(Counter((r.kind, r.context) for r in found).items(), key=lambda kv: (CATALOG_REF_KINDS.index(kv[0][0]), kv[0][1])):
-        click.echo(f"  {kind}  {context}  {n}")
-    click.echo("distinct values by kind")
+        lines.append(f"  {kind}  {context}  {n}")
+    lines.append("distinct values by kind")
     for kind in CATALOG_REF_KINDS:
         distinct = {r.value for r in found if r.kind == kind}
         if distinct:
-            click.echo(f"  {kind}  {len(distinct)}")
-    click.echo("by property (top 40)")
+            lines.append(f"  {kind}  {len(distinct)}")
+    lines.append("by property (top 40)")
     for name, n in Counter(r.holder for r in found).most_common(40):
-        click.echo(f"  {name}  {n}")
+        lines.append(f"  {name}  {n}")
     if skipped:
-        click.echo("skipped properties")
+        lines.append("skipped properties")
         for name, n in sorted(skipped.items()):
-            click.echo(f"  {name}  {n}")
+            lines.append(f"  {name}  {n}")
+    return lines
 
 
 def _tree(ctx: click.Context, ref: str, field: str, recursive: bool, summary: bool, output_format: str,
