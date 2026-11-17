@@ -76,6 +76,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `find --verb NAME` | objects defining a verb that a call to NAME would match, waif class verbs (stored as `:NAME`) included |
 | `find --prop NAME` | objects defining a property called NAME |
 | `refs REF` | property values holding the object, and verb code lines mentioning `#N` or its `$name` |
+| `waifs CLASS [--by SLOT]... [--where SLOT~RE \| SLOT!~RE]... [-i]` | counts the dump's waifs of CLASS or a descendant, each once, by class. SLOT is a waif slot name, `name[N]` for a list element, either with a trailing `?` for MOO truth; an unset slot has its class's value. `--where` keeps waifs whose slot string, or any string in its list, matches (`!~`: none does); `--by` groups the kept waifs by those slots, largest group first. `waifs '$exitwaif' --by 'aliases[1]' --by 'placed?'` |
 | `values PATTERN [-i] [-F] [--in-waif REF]` | Python regex over every stored string: each object's own property values (anonymous objects included), through lists, map keys and values, and into waifs. Prints the path, e.g. `#4982.systems[10]<waif #4238>.sounds["engage"]<waif #3010>.snd = "..."`, with waif slots named and list indexes 1-based. `--in-waif` keeps only strings inside a waif of that class or a descendant |
 | `sound-refs [--kind K]... [--ids FILE] [--skip GLOB]... [--code] [--summary] [--format text\|jsonl] [--output FILE]` | every stored sound catalog reference, following the game's grammar of a sound value (`#2585:_snd_candidates`): INT sound ids and `["group" -> n]`/`["sound" -> n]` maps, alone or in lists, in properties and waif slots named `*_snd` and in `$social`'s `"sound"`/`"sounds"`; maps of only sound-entry keys anywhere; `$catalog_sound` waif id slots; strings ending in a sound file extension (a slice with `#N`). One line per reference: holder and path, kind (`sound group content asset segment path slice code`), value, context. `--ids FILE` takes `KIND<TAB>VALUE` lines, prints only those references and exits 1 if any is found, matching a path or slice name as the game resolves one (`#6128:resolve`: ignoring case, URL-encoding and leading zeros of the slice number); `--code` (with `--ids`) adds verb code lines holding one of them as a literal. `--skip` leaves out caches and pick memories by property or slot name and counts them on stderr. `--output FILE` writes what would go to standard output into FILE (UTF-8, `\n` line endings, replacing the file) and prints `N lines: FILE` instead; the exit status and stderr are unchanged. Integers in other properties are not seen |
 | `children REF [-r]`, `contents REF [-r]` | direct or recursive children / contents; `--summary [--format json]` measures the whole reachable graph |
@@ -536,7 +537,7 @@ itself:
   reads object #0 and its dependencies for `$names`; it does not parse every
   object on a cached query. Empty programs are still excluded from "with code".
 - `refs`, `values` and `sound-refs` look at every object, so they parse the
-  whole dump each time.
+  whole dump each time. `waifs` reads every record that defines a waif.
 
 The index lives under `lambdamoo-db` in `$XDG_CACHE_HOME`, `%LOCALAPPDATA%` or
 `~/.cache`. Change that with `--cache-dir`. `--no-cache` parses the whole dump

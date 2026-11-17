@@ -869,6 +869,98 @@ def walk_stored_values(db: MooDatabase, skip: Callable[[str], bool] | None = Non
             yield from walk(obj, prop.value, f".{name}", (ValueStep("prop", name),), frozenset())
 
 
+@attrs.frozen
+class WaifSlotSpec:
+    """A waif slot to read: ``name``, ``name[N]`` (1-based list element) or either followed by ``?`` (MOO truth)."""
+
+    text: str
+    name: str
+    index: int | None
+    truth: bool
+
+
+_WAIF_SLOT_SPEC = re.compile(r"([^\[\]?~!]+?)(?:\[(\d+)\])?(\?)?")
+NO_VALUE = object()  # a list index past the end, or a slot the class does not have
+
+
+def parse_waif_slot_spec(text: str) -> WaifSlotSpec:
+    m = _WAIF_SLOT_SPEC.fullmatch(text.strip())
+    if m is None or (m[2] is not None and int(m[2]) < 1):
+        raise ValueError(f"expected NAME, NAME[N] or either with a trailing ?, not {text!r}")
+    return WaifSlotSpec(text.strip(), m[1].strip().lstrip(":"), int(m[2]) if m[2] else None, bool(m[3]))
+
+
+def moo_truth(value: Any) -> bool:
+    """MOO's is_true(): nonzero numbers and non-empty strings, lists and maps; everything else is false."""
+    if isinstance(value, (str, list, dict)):
+        return len(value) > 0
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, (ObjNum, MooError)):
+        return value != 0
+    return False
+
+
+@attrs.frozen
+class WaifCount:
+    by_class: Counter[int]  # every waif of the class or a descendant, by its own class
+    matched: int  # how many of those pass every filter
+    groups: Counter[tuple[str, ...]]  # matched waifs by their ``by`` values as MOO literals ("none": no such value)
+
+
+def count_waifs(
+    db: MooDatabase,
+    cls: MooObject,
+    by: Sequence[WaifSlotSpec] = (),
+    where: Sequence[tuple[WaifSlotSpec, re.Pattern[str], bool]] = (),
+) -> WaifCount:
+    """Count the dump's waifs of ``cls`` or a descendant, grouped by slot values.
+
+    A slot the waif does not set has its class's value (following ``clear``).
+    Each ``where`` entry is (slot, pattern, negate): the slot's string, or any
+    string element of its list, must match ``pattern`` (must not, if negate).
+    Each waif is counted once, however many places hold it.
+    """
+    classes = {cls.id, *(d.id for d in descendants(db, cls))}
+    names: dict[int, list[str]] = {}
+    defaults: dict[tuple[int, str], Any] = {}
+
+    def slot(waif: Waif, spec: WaifSlotSpec) -> Any:
+        c = int(waif.waif_class)
+        if c not in names:
+            names[c] = waif_slot_names(db, c)
+        wanted = spec.name.lower()
+        position = next((i for i, n in enumerate(names[c]) if n.lower() == wanted), None)
+        if position is None:
+            value = NO_VALUE
+        else:
+            value = next((v for s, v in waif.props if s == position), CLEAR)
+            if value is CLEAR:
+                if (c, wanted) not in defaults:
+                    defaults[(c, wanted)] = lookup_property(db, db.objects[c], ":" + spec.name).value
+                value = defaults[(c, wanted)]
+        if spec.index is not None:
+            value = value[spec.index - 1] if isinstance(value, list) and spec.index <= len(value) else NO_VALUE
+        return moo_truth(value) if spec.truth else value
+
+    def passes(value: Any, pattern: re.Pattern[str]) -> bool:
+        strings = value if isinstance(value, list) else [value]
+        return any(isinstance(s, str) and pattern.search(s) for s in strings)
+
+    by_class: Counter[int] = Counter()
+    groups: Counter[tuple[Any, ...]] = Counter()
+    matched = 0
+    for index in db.waifs:
+        waif = db.waifs[index]
+        if int(waif.waif_class) not in classes:
+            continue
+        by_class[int(waif.waif_class)] += 1
+        if all(passes(slot(waif, s), rx) != negate for s, rx, negate in where):
+            matched += 1
+            groups[tuple("none" if (v := slot(waif, s)) is NO_VALUE else _format(v) for s in by)] += 1
+    return WaifCount(by_class, matched, groups)
+
+
 def find_strings(db: MooDatabase, pattern: re.Pattern[str]) -> Iterator[StoredString]:
     """Every stored string matching ``pattern``, with the path to it (see ``walk_stored_values``)."""
     for v in walk_stored_values(db):
