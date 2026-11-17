@@ -22,6 +22,8 @@ from .inspection import (
     builtin_value,
     clusters,
     code_fingerprint,
+    count_waifs,
+    parse_waif_slot_spec,
     defined_property_names,
     descendants,
     dollar_names,
@@ -1554,6 +1556,45 @@ def values(ctx: click.Context, pattern: str, ignore_case: bool, fixed_strings: b
         if wanted is not None and not wanted.intersection(hit.waif_classes):
             continue
         click.echo(f"{label(db, hit.obj.id, names)}{hit.where} = {moo_string(hit.value)}")
+
+
+@moodb.command()
+@click.argument("cls", metavar="CLASS")
+@click.option("--by", "by", multiple=True, metavar="SLOT", help="Group by this slot: NAME, NAME[N], either with ? for MOO truth (repeatable; groups by all of them).")
+@click.option("--where", "where", multiple=True, metavar="SLOT~RE", help="Keep waifs whose slot string, or any string in its list, matches RE; SLOT!~RE keeps those where none does (repeatable).")
+@click.option("-i", "--ignore-case", is_flag=True, help="--where patterns ignore case.")
+@click.pass_context
+def waifs(ctx: click.Context, cls: str, by: tuple[str, ...], where: tuple[str, ...], ignore_case: bool) -> None:
+    """Count waifs of CLASS or a descendant: `waifs '$exitwaif' --by 'aliases[1]' --by 'placed?'`.
+
+    Each waif is counted once. A slot it does not set has its class's value.
+    Prints the total by class, then how many pass every --where, then one
+    line per group with its count, largest first; "none" is a list index past
+    the end or a slot the class lacks.
+    """
+    db, names = _db(ctx)
+    parent = _object(db, cls)
+    try:
+        specs = [parse_waif_slot_spec(s) for s in by]
+        filters = []
+        for w in where:
+            negate = "!~" in w
+            left, _, pattern = w.partition("!~" if negate else "~")
+            if not _:
+                raise ValueError(f"expected SLOT~RE or SLOT!~RE, not {w!r}")
+            filters.append((parse_waif_slot_spec(left), re.compile(pattern, re.IGNORECASE if ignore_case else 0), negate))
+    except (ValueError, re.error) as e:
+        raise click.BadParameter(str(e))
+    found = count_waifs(db, parent, specs, filters)
+    click.echo(f"{sum(found.by_class.values())} waifs of {label(db, parent.id, names)} or a descendant")
+    for c, n in found.by_class.most_common():
+        click.echo(f"  {n:7d}  {label(db, c, names)}")
+    if filters:
+        click.echo(f"{found.matched} pass {' and '.join(where)}")
+    if specs:
+        click.echo("by " + ", ".join(s.text for s in specs))
+        for key, n in sorted(found.groups.items(), key=lambda kv: (-kv[1], kv[0])):
+            click.echo(f"  {n:7d}  " + "  ".join(key))
 
 
 def _system_object(db, name: str) -> int | None:
