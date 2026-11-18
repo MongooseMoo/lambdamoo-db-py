@@ -15,7 +15,7 @@ import re
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
-from typing import Any, Callable, Iterator, NamedTuple, Sequence
+from typing import Any, Callable, Collection, Iterator, NamedTuple, Sequence
 from urllib.parse import unquote
 
 import attrs
@@ -975,6 +975,13 @@ CATALOG_SLOTS = {"sound_id": "sound", "content_id": "content", "asset_id": "asse
 CATALOG_ID_KINDS = ("sound", "group", "content", "asset", "segment", "path", "slice")  # what an --ids line may name
 CATALOG_REF_KINDS = (*CATALOG_ID_KINDS, "code")
 _SOUND_FILE = re.compile(r"\.(m4a|ogg|wav|mp3|flac|aiff?|opus)(#\d+)?$", re.IGNORECASE)
+# Sound markers in a message (#2585:msg lines 3 and 5): "$sndid, <1..9 digits>" or "$snd,<path>", the value
+# running from after the tag and its spaces to the next space (#2585:_find_marker lines 5-13).
+_SOUND_MARKER = re.compile(r"\$sndid, *(\d{1,9})(?![^ ])|\$snd, *([^ ]+)")
+# Property, waif slot and map key names holding one sound id that do not end "_snd":
+# $sound_db:get_sound_by_id(params["sound_id"]) (#2585:step_playback line 23), $ringing_ears.tone_sound_id
+# (#53614:apply line 19), $sh.login_music_id (#2585:login_music_sound line 2).
+_SOUND_ID_NAME = re.compile(r"(.*_)?sound_id|login_music_id", re.IGNORECASE)
 
 
 def catalog_name_key(name: str) -> str:
@@ -994,7 +1001,7 @@ class CatalogRef:
     where: str  # path syntax of StoredString, or ":[idx] verb:line" for kind code
     kind: str  # one of CATALOG_REF_KINDS
     value: int | str
-    context: str  # snd-property, snd-slot, social, snd-map, catalog-waif, string, code
+    context: str  # snd-property, snd-slot, snd-key, sounds, sound-id, social, snd-map, catalog-waif, string, marker, bare, code
     holder: str  # the innermost property or waif slot name on the path; for kind code, the verb's name
 
 
@@ -1003,21 +1010,34 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _sound_value_start(steps: tuple[ValueStep, ...], on_social: bool) -> tuple[int, str] | None:
-    """Where a sound value begins on this path (index into ``steps``) and the context naming why, or None.
+def _sound_value_starts(steps: tuple[ValueStep, ...], on_social: bool) -> Iterator[tuple[int, str]]:
+    """Each place a sound value begins on this path (index into ``steps``) with the context naming why, innermost first.
 
-    A property or waif slot named ``*_snd`` holds one; on ``$social``, so do a
-    social's ``["sound"]`` and each of its ``["sounds"][form]``
+    A property, waif slot or map key named ``*_snd`` holds one (a key:
+    ``this.electronics_profile:get("door_open_snd", 0)``, #53020:storage_notice
+    line 7). So does one named like ``_SOUND_ID_NAME``. One named ``sounds`` or
+    ``*_sounds`` holds a sound value (a ``$scene_event``'s ``sounds``,
+    #10205:make_sound line 1) or a map of them by name
+    (``interaction_sounds``, #4031:interaction_sound line 8). On ``$social``, a
+    social's ``["sound"]`` and each of its ``["sounds"][form]`` hold one
     (#1652:test_all_socials_populated lines 19-27).
     """
-    for i, step in enumerate(steps):
-        if step.kind in ("prop", "slot") and isinstance(step.key, str) and step.key.lower().endswith("_snd"):
-            return i + 1, "snd-property" if step.kind == "prop" else "snd-slot"
-    if on_social and len(steps) >= 2 and steps[1] == ValueStep("key", "sound"):
-        return 2, "social"
     if on_social and len(steps) >= 3 and steps[1] == ValueStep("key", "sounds") and steps[2].kind == "key":
-        return 3, "social"
-    return None
+        yield 3, "social"
+    if on_social and len(steps) >= 2 and steps[1] == ValueStep("key", "sound"):
+        yield 2, "social"
+    for i in range(len(steps) - 1, -1, -1):
+        step = steps[i]
+        if step.kind not in ("prop", "slot", "key") or not isinstance(step.key, str):
+            continue
+        name = step.key.lower()
+        if name.endswith("_snd"):
+            yield i + 1, {"prop": "snd-property", "slot": "snd-slot", "key": "snd-key"}[step.kind]
+        elif _SOUND_ID_NAME.fullmatch(name):
+            yield i + 1, "sound-id"
+        elif name == "sounds" or name.endswith("_sounds"):
+            named = i + 1 < len(steps) and steps[i + 1].kind == "key" and steps[i + 1].key not in SOUND_ENTRY_KEYS
+            yield i + 2 if named else i + 1, "sounds"
 
 
 def _sound_value_position(rest: tuple[ValueStep, ...]) -> str | None:
@@ -1037,15 +1057,18 @@ def _sound_value_position(rest: tuple[ValueStep, ...]) -> str | None:
 
 
 def find_catalog_refs(db: MooDatabase, catalog_class: int | None, social: int | None, skip: Sequence[str] = (),
-                      skipped: Counter | None = None) -> Iterator[CatalogRef]:
+                      skipped: Counter | None = None, bare: Collection[int] = ()) -> Iterator[CatalogRef]:
     """Every stored sound catalog reference, following the game's grammar of a sound value (#2585:_snd_candidates).
 
     A sound value is one entry or a list of entries; an entry is an INT > 0
     (a sound id), a STR (a path or slice name) or a map holding exactly one of
     ``"group"`` and ``"sound"``. Rules:
 
-    1. A sound value is held in a property or waif slot named ``*_snd``, or on
-       ``social`` under a social's ``"sound"`` or ``"sounds"[form]``.
+    1. A sound value is held where ``_sound_value_starts`` says: under a
+       property, waif slot or map key named ``*_snd``, ``sound_id``,
+       ``*_sound_id``, ``login_music_id``, ``sounds`` or ``*_sounds`` (there
+       also one per name), or on ``social`` under a social's ``"sound"`` or
+       ``"sounds"[form]``.
     2. In a sound value, an INT > 0 entry is a sound; in an entry map an INT > 0
        under ``"group"`` is a group and under ``"sound"`` a sound.
     3. Elsewhere, a map whose keys are all sound entry keys and that holds an
@@ -1053,8 +1076,11 @@ def find_catalog_refs(db: MooDatabase, catalog_class: int | None, social: int | 
     4. In a waif of ``catalog_class`` or a descendant, an INT > 0 in a
        ``CATALOG_SLOTS`` slot names that row; an object number there is unset.
     5. Any STR ending in a sound file extension is a path, or a slice with ``#N``.
+       A STR holding ``$sndid, N`` or ``$snd,PATH`` markers gives those instead.
     6. A property or waif slot whose name matches a ``skip`` glob is not
        entered; ``skipped`` counts them by name.
+    7. Any other INT that is in ``bare`` is reported as a sound (bare): the
+       rules above cannot know every property the game keeps an id in.
     """
     catalog = set()
     if catalog_class is not None and catalog_class in db.objects:
@@ -1071,18 +1097,31 @@ def find_catalog_refs(db: MooDatabase, catalog_class: int | None, social: int | 
         value, steps = v.value, v.steps
         holder = next(s.key for s in reversed(steps) if s.kind in ("prop", "slot"))
         if isinstance(value, str):
-            match = _SOUND_FILE.search(value)
+            markers = list(_SOUND_MARKER.finditer(value))
+            for marker in markers:
+                if marker.group(1):
+                    yield CatalogRef(v.obj, v.where, "sound", int(marker.group(1)), "marker", holder)
+                else:
+                    kind = "slice" if re.search(r"#\d+$", marker.group(2)) else "path"
+                    yield CatalogRef(v.obj, v.where, kind, marker.group(2), "marker", holder)
+            match = None if markers else _SOUND_FILE.search(value)
             if match:
                 yield CatalogRef(v.obj, v.where, "slice" if match.group(2) else "path", value, "string", holder)
             continue
-        start = _sound_value_start(steps, v.obj.id == social)
-        position = _sound_value_position(steps[start[0]:]) if start else None
+        position, context = None, ""
+        for start, why in _sound_value_starts(steps, v.obj.id == social):
+            position = _sound_value_position(steps[start:])
+            if position is not None:
+                context = why
+                break
         if _is_int(value) and value > 0:
             last = steps[-1]
-            if position is not None:
-                yield CatalogRef(v.obj, v.where, "group" if position == "group" else "sound", value, start[1], holder)
-            elif last.kind == "slot" and last.waif_class in catalog and last.key in CATALOG_SLOTS:
+            if last.kind == "slot" and last.waif_class in catalog and last.key in CATALOG_SLOTS:
                 yield CatalogRef(v.obj, v.where, CATALOG_SLOTS[last.key], value, "catalog-waif", holder)
+            elif position is not None:
+                yield CatalogRef(v.obj, v.where, "group" if position == "group" else "sound", value, context, holder)
+            elif value in bare:
+                yield CatalogRef(v.obj, v.where, "sound", value, "bare", holder)
         elif isinstance(value, dict) and position != "sound" and value and set(value) <= SOUND_ENTRY_KEYS:
             for key in ("group", "sound"):
                 if key in value and _is_int(value[key]) and value[key] > 0:

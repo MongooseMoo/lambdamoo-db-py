@@ -1643,15 +1643,19 @@ def _read_ids(path: str) -> set[tuple[str, int | str]]:
 @click.option("--kind", "kinds", multiple=True, type=click.Choice(CATALOG_REF_KINDS), help="Only references of this kind (repeatable).")
 @click.option("--ids", "ids_file", type=click.Path(exists=True, dir_okay=False),
               help="File of KIND<TAB>VALUE lines: print only those references; exit 1 if any is found, 0 if none.")
+@click.option("--except-ids", "except_file", type=click.Path(exists=True, dir_okay=False),
+              help="File of KIND<TAB>VALUE lines to take out of --ids, such as the rows a removal kept (needs --ids).")
 @click.option("--skip", multiple=True, metavar="GLOB", help="Do not enter properties or waif slots with a matching name (repeatable); counted on stderr.")
 @click.option("--code", is_flag=True, help="Also report verb code lines with an --ids integer or path/slice as a literal (needs --ids).")
+@click.option("--bare", is_flag=True,
+              help="Also report every other stored integer equal to an --ids sound id, wherever it is held (needs --ids).")
 @click.option("--summary", is_flag=True, help="Counts by kind and context, distinct values per kind, and by property name, instead of lines.")
 @click.option("--format", "output_format", type=click.Choice(["text", "jsonl"]), default="text", show_default=True)
 @click.option("--output", type=click.Path(dir_okay=False),
               help="Write the lines to this file (UTF-8, replacing it) and print only their count and the file.")
 @click.pass_context
-def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None, skip: tuple[str, ...], code: bool,
-               summary: bool, output_format: str, output: str | None) -> None:
+def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None, except_file: str | None, skip: tuple[str, ...], code: bool,
+               bare: bool, summary: bool, output_format: str, output: str | None) -> None:
     """Stored sound catalog references: sound, group, content, asset and segment ids, paths and slice names.
 
     Follows the game's grammar of a sound value (#2585:_snd_candidates): one
@@ -1659,14 +1663,18 @@ def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None,
     one of "group" and "sound". Where a sound value is looked for:
 
     \b
-    - properties and waif slots named *_snd (any case);
+    - properties, waif slots and map keys named *_snd (any case);
+    - those named sound_id, *_sound_id or login_music_id;
+    - those named sounds or *_sounds: one sound value, or a map of them by
+      name;
     - on $social, each social's ["sound"] and ["sounds"][form];
     - anywhere, a map whose keys are all group/sound/volume/gain_db/vary/
       normalize/modifiers and that holds an INT group or sound (snd-map);
     - in $catalog_sound waifs, sound_id, content_id, asset_id, segment_id and
       variation_group_id (an object number there is unset);
     - anywhere, a string ending .m4a .ogg .wav .mp3 .flac .aif(f) .opus, a
-      slice when followed by #N.
+      slice when followed by #N;
+    - anywhere, a message string's "$sndid, N" and "$snd,PATH" markers.
 
     \b
     --ids matches a path or slice name as the game resolves one
@@ -1675,16 +1683,21 @@ def sound_refs(ctx: click.Context, kinds: tuple[str, ...], ids_file: str | None,
 
     \b
     It cannot see: the live game after this dump (take a fresh checkpoint);
-    values built at run time; bare integers in properties not named *_snd
-    and outside those map shapes (verb literals with --code); values in
-    suspended task frames.
+    values built at run time; integers held under other names (--bare
+    reports each one equal to an --ids sound id, whatever it means there);
+    verb literals without --code; values in suspended task frames.
     """
-    if code and ids_file is None:
-        raise click.UsageError("--code needs --ids: without an id set every number in code would match")
+    if (code or bare) and ids_file is None:
+        raise click.UsageError("--code and --bare need --ids: without an id set every number would match")
+    if except_file and ids_file is None:
+        raise click.UsageError("--except-ids needs --ids")
     ids = _read_ids(ids_file) if ids_file else None
+    if except_file:
+        ids -= _read_ids(except_file)
     db, names = _db(ctx)
     skipped: Counter = Counter()
-    found = list(find_catalog_refs(db, _system_object(db, "catalog_sound"), _system_object(db, "social"), skip, skipped))
+    listed = {value for kind, value in ids if kind == "sound"} if bare else ()
+    found = list(find_catalog_refs(db, _system_object(db, "catalog_sound"), _system_object(db, "social"), skip, skipped, listed))
     if ids is not None:
         def key(value: int | str) -> int | str:
             return catalog_name_key(value) if isinstance(value, str) else value
