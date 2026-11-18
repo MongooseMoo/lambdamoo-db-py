@@ -1364,7 +1364,9 @@ def added_props(ctx: click.Context, old: str, pattern: str | None, ignore_case: 
 
 
 @moodb.command()
-@click.argument("text", nargs=-1, required=True)
+@click.argument("text", nargs=-1)
+@click.option("--multi-parent", "mode", flag_value="multi-parent",
+              help="Find every object with more than one parent, with its parents in order; takes no TEXT.")
 @click.option("--verb", "mode", flag_value="verb", help="Find objects defining a verb that TEXT would call (MOO name matching), waif class verbs (`:TEXT`) included.")
 @click.option("--prop", "mode", flag_value="prop", help="Find objects defining a property named TEXT (case-insensitive).")
 @click.option("--glob", "glob", is_flag=True,
@@ -1381,7 +1383,21 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
 
     With --verb or --prop, find where a verb or property is defined instead.
     Several TEXTs are answered in one run, each under an `== TEXT` line.
+    With --multi-parent, list the objects that have more than one parent.
     """
+    if mode == "multi-parent":
+        if text or glob or no_catchall or by_name:
+            raise click.UsageError("--multi-parent takes no TEXT and no other option but -c")
+        db, names = _db(ctx)
+        found = [o for o in object_heads(db) if len(o.parents) > 1]
+        if count:
+            click.echo(f"{len(found):6d}  objects with more than one parent")
+            return
+        for o in found:
+            click.echo(f"{label(db, o.id, names)}  parents " + ", ".join(label(db, int(p), names) for p in o.parents))
+        return
+    if not text:
+        raise click.UsageError("give TEXT to find, or --multi-parent")
     if glob and mode is None:
         raise click.UsageError("--glob needs --verb or --prop")
     if no_catchall and mode != "verb":
