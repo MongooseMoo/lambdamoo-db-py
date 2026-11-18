@@ -261,6 +261,20 @@ def test_clear_follows_the_parent_that_inherits_the_definer():
     assert [(h.name, h.value) for h in all_properties(db, child)] == [("c1", "C-value"), ("a1", "A-value"), ("b1", "C-b1")]
 
 
+def test_cli_find_multi_parent_lists_objects_with_several_parents(monkeypatch):
+    from lambdamoo_db import cli
+
+    db = multi_parent_db()
+    monkeypatch.setattr(cli, "_db", lambda ctx: (db, {}))
+    r = CliRunner().invoke(moodb, ["find", "--multi-parent"])
+    assert r.exit_code == 0, r.output
+    assert r.output.splitlines() == ['#3 "obj3"  parents #1 "obj1", #2 "obj2"']
+    r = CliRunner().invoke(moodb, ["find", "--multi-parent", "-c"])
+    assert r.output == "     1  objects with more than one parent\n"
+    assert CliRunner().invoke(moodb, ["find", "--multi-parent", "obj"]).exit_code == 2
+    assert CliRunner().invoke(moodb, ["find"]).exit_code == 2
+
+
 def run(*args):
     return CliRunner().invoke(moodb, ["--db", str(TOASTCORE), "--no-cache", *args])
 
