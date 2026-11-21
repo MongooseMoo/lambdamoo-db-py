@@ -47,6 +47,7 @@ from .inspection import (
     object_flags,
     own_properties,
     property_perms,
+    Reference,
     resolve_object,
     split_ref,
     stored_properties,
@@ -1459,16 +1460,20 @@ def find(ctx: click.Context, text: tuple[str, ...], mode: str | None, glob: bool
 def refs(ctx: click.Context, ref: tuple[str, ...], code_only: bool, skipped: tuple[str, ...], width: int) -> None:
     """Find references to an object: property values holding it, and verb code naming #N or its $name.
 
-    Several REFs are answered in one run, each under an `== REF` line.
+    Several REFs are answered in one run, each under an `== REF` line; the
+    database is walked once for all of them.
     """
     db, names = _db(ctx)
     targets = [_object(db, one) for one in ref]
+    found: dict[int, list[Reference]] = {t.id: [] for t in targets}
+    for target_id, r in find_references(db, targets, names):
+        found[target_id].append(r)
+    skip = re.compile(r"\.(" + "|".join(re.escape(s) for s in skipped) + r")(?=[\[.]|$)", re.I) if skipped else None
     for one, target in zip(ref, targets):
         if len(ref) > 1:
             click.echo(f"== {one}")
         number = re.compile(rf"#{target.id}(?!\d)")
-        skip = re.compile(r"\.(" + "|".join(re.escape(s) for s in skipped) + r")(?=[\[.]|$)", re.I) if skipped else None
-        for r in find_references(db, target, names):
+        for r in found[target.id]:
             if code_only and not r.where.startswith(":["):
                 continue
             if skip and skip.match(r.where):
