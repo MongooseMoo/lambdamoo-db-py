@@ -52,7 +52,7 @@ def test_find_nested_references_in_lists_and_both_sides_of_maps():
 
     value = [7, "#7", Anon(7), MooError(7), {7: "integer", ObjNum(7): [[ObjNum(7)]]}, ObjNum(7)]
     db = database_with_value(value)
-    assert [str(path) for path in find_property_references(db, 7)] == [
+    assert [str(path) for _, path in find_property_references(db, 7)] == [
         "#0.properties[0].value[4].entries[1].key",
         "#0.properties[0].value[4].entries[1].value[0][0]",
         "#0.properties[0].value[5]",
@@ -68,7 +68,7 @@ def test_scalar_properties_and_shared_lists_are_reported_at_every_path():
     shared = [ObjNum(7)]
     db = database_with_value([shared, shared])
     db.objects[0].properties.append(Property("direct", ObjNum(7), 0, 0))
-    assert [str(path) for path in find_property_references(db, ObjNum(7))] == [
+    assert [str(path) for _, path in find_property_references(db, ObjNum(7))] == [
         "#0.properties[0].value[0][0]",
         "#0.properties[0].value[1][0]",
         "#0.properties[1].value",
@@ -81,7 +81,7 @@ def test_deep_nesting_does_not_use_python_recursion():
     value = ObjNum(7)
     for _ in range(1500):
         value = [value]
-    paths = list(find_property_references(database_with_value(value), 7))
+    paths = [path for _, path in find_property_references(database_with_value(value), 7)]
     assert len(paths) == 1
     assert paths[0].segments == ("#0", "properties", 0, "value") + (0,) * 1500
 
@@ -114,6 +114,17 @@ def test_json_export_keeps_existing_numeric_scalar_representation():
     document = json.loads(to_json(db))
     assert document["objects"]["0"]["owner"] == 0
     assert document["objects"]["0"]["properties"][0]["value"] == [7, 8, 1]
+
+
+def test_many_targets_are_found_in_one_walk():
+    from lambdamoo_db.references import find_property_references
+
+    db = database_with_value([ObjNum(7), ObjNum(8), ObjNum(9)])
+    assert [(target, str(path)) for target, path in find_property_references(db, 7, ObjNum(9))] == [
+        (7, "#0.properties[0].value[0]"),
+        (9, "#0.properties[0].value[2]"),
+    ]
+    assert list(find_property_references(db)) == []
 
 
 @pytest.mark.parametrize("oid", [True, 7.0, "7", Anon(7)])

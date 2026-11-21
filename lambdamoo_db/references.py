@@ -7,9 +7,11 @@ from .compare import DiffPath
 from .database import MooDatabase, ObjNum
 
 
-def find_property_references(db: MooDatabase, oid: int | ObjNum) -> Iterator[DiffPath]:
-    """Yield every property-value path containing the requested object reference.
+def find_property_references(db: MooDatabase, *oids: int | ObjNum) -> Iterator[tuple[int, DiffPath]]:
+    """Yield (target, path) for every property-value path holding one of the requested objects.
 
+    All targets are found in one walk of the database, so asking about many
+    objects costs about the same as asking about one.
     List indexes and map entry indexes are zero-based. Map paths use
     ``entries[index].key`` or ``entries[index].value`` in insertion order.
     Only ObjNum values match; integers, strings, and anonymous references do
@@ -17,9 +19,12 @@ def find_property_references(db: MooDatabase, oid: int | ObjNum) -> Iterator[Dif
     Paths describe the current database; do not mutate it while iterating.
     Cyclic Python containers are rejected (MOO dump values are acyclic).
     """
-    if type(oid) not in (int, ObjNum):
-        raise TypeError("oid must be an int or ObjNum")
-    target = int(oid)
+    for oid in oids:
+        if type(oid) not in (int, ObjNum):
+            raise TypeError("oid must be an int or ObjNum")
+    targets = {int(oid) for oid in oids}
+    if not targets:
+        return
     for obj_id, obj in db.objects.items():
         for index, prop in enumerate(obj.properties):
             root = DiffPath.object(int(obj_id)).child("properties").child(index).child("value")
@@ -30,8 +35,8 @@ def find_property_references(db: MooDatabase, oid: int | ObjNum) -> Iterator[Dif
                 if leaving:
                     ancestors.remove(id(value))
                 elif isinstance(value, ObjNum):
-                    if int(value) == target:
-                        yield path
+                    if int(value) in targets:
+                        yield int(value), path
                 elif isinstance(value, (list, dict)):
                     if id(value) in ancestors:
                         raise ValueError(f"Cyclic property value at {path}")

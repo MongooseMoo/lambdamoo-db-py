@@ -678,19 +678,34 @@ class Reference:
     text: str  # the matching code line, or ""
 
 
-def find_references(db: MooDatabase, target: MooObject, names: dict[int, str]) -> Iterator[Reference]:
-    """Property values holding ``#N``, then verb code lines mentioning ``#N`` or its ``$name``."""
-    for path in find_property_references(db, target.id):
+def find_references(db: MooDatabase, targets: Sequence[MooObject],
+                    names: dict[int, str]) -> Iterator[tuple[int, Reference]]:
+    """(target id, reference) for every target: property values holding ``#N``, then verb code lines
+    mentioning ``#N`` or its ``$name``.
+
+    Property values are walked once and verb code is searched once for all
+    targets together, so many targets cost about the same as one. A code line
+    naming several targets is reported for each of them.
+    """
+    for target_id, path in find_property_references(db, *(t.id for t in targets)):
         num, _, index, _, *rest = path.segments
         o = db.objects[int(str(num).lstrip("#"))]
         prop = o.properties[int(index)].propertyName
-        yield Reference(o, f".{prop}" + "".join(f"[{s}]" if isinstance(s, int) else f".{s}" for s in rest), "")
-    words = [rf"(?<![\w#$-])#{target.id}(?![0-9])"]
-    if target.id in names:
-        words.append(rf"(?<![\w$])\{names[target.id]}(?![\w])")
-    rx = re.compile("|".join(words))
+        yield target_id, Reference(o, f".{prop}" + "".join(f"[{s}]" if isinstance(s, int) else f".{s}" for s in rest), "")
+    if not targets:
+        return
+    each: dict[int, re.Pattern[str]] = {}
+    for target in targets:
+        words = [rf"(?<![\w#$-])#{target.id}(?![0-9])"]
+        if target.id in names:
+            words.append(rf"(?<![\w$])\{names[target.id]}(?![\w])")
+        each[target.id] = re.compile("|".join(words))
+    rx = re.compile("|".join(f"(?:{p.pattern})" for p in each.values()))
     for hit in grep_verbs(db, rx):
-        yield Reference(hit.obj, f":[{hit.index}] {hit.verb.name.split(' ')[0]}:{hit.lineno}", hit.line.strip())
+        for target_id, own in each.items():
+            if own.search(hit.line):
+                yield target_id, Reference(hit.obj, f":[{hit.index}] {hit.verb.name.split(' ')[0]}:{hit.lineno}",
+                                           hit.line.strip())
 
 
 @attrs.frozen
