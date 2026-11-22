@@ -1888,6 +1888,68 @@ def contents(ctx: click.Context, ref: str, recursive: bool, summary: bool, outpu
 
 
 @moodb.command()
+@click.argument("root", default="$room")
+@click.option("--verb", "verb_name", default="light_emission", show_default=True,
+              help="A thing that has this verb (inherited, MOO name matching) counts as a light source.")
+@click.option("--list", "list_kind", type=click.Choice(["dark", "sourced", "outdoor", "filled"]),
+              help="Also list every room of this kind.")
+@click.option("--limit", default=5, show_default=True, help="Example rooms per kind (0 = none).")
+@click.pass_context
+def unlit(ctx: click.Context, root: str, verb_name: str, list_kind: str | None, limit: int) -> None:
+    """Sort ROOT's descendant rooms by where their light could come from.
+
+    outdoor: outdoor is true (the sky can light it). filled: indoor with a
+    positive ambient_light (a builder's stated light). sourced: indoor, no
+    fill, and something in its contents, at any depth, has VERB. dark: indoor,
+    no fill, nothing with VERB anywhere inside: no light at all once indoor
+    rooms get none for free. Closed containers are looked into, so sourced is
+    an upper bound and dark a lower bound.
+    """
+    db, names = _db(ctx)
+    kinds: dict[str, list[int]] = {"outdoor": [], "filled": [], "sourced": [], "dark": []}
+    shines: dict[int, bool] = {}
+
+    def has_verb(o) -> bool:
+        if o.id not in shines:
+            try:
+                find_verb(db, o, verb_name)
+                shines[o.id] = True
+            except LookupFailed:
+                shines[o.id] = False
+        return shines[o.id]
+
+    def number(value) -> float:
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+    try:
+        top = resolve_object(db, root)
+        for room in (top, *descendants(db, top)):  # ROOT first: a property ROOT lacks is an error, not 0 rooms
+            outdoor = number(lookup_property(db, room, "outdoor").value)
+            fill = number(lookup_property(db, room, "ambient_light").value)
+            if room is top:
+                continue
+            if outdoor:
+                kind = "outdoor"
+            elif fill > 0.0:
+                kind = "filled"
+            elif any(has_verb(o) for o in descendants(db, room, "contents")):
+                kind = "sourced"
+            else:
+                kind = "dark"
+            kinds[kind].append(room.id)
+    except LookupFailed as e:
+        raise click.ClickException(str(e))
+    total = sum(len(v) for v in kinds.values())
+    click.echo(f"{total} rooms under {label(db, top.id, names)}; a thing with :{verb_name} is a light source")
+    for kind, rooms in kinds.items():
+        examples = ", ".join(f"#{r} {moo_string(db.objects[r].name)}" for r in rooms[:limit]) if limit else ""
+        click.echo(f"{kind:>8} {len(rooms):>7}" + (f"  e.g. {examples}" if examples else ""))
+    if list_kind:
+        for r in kinds[list_kind]:
+            click.echo(label(db, r, names))
+
+
+@moodb.command()
 @click.pass_context
 def players(ctx: click.Context) -> None:
     """List player objects with their flags."""
