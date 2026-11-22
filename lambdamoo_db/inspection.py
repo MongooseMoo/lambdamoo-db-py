@@ -955,6 +955,69 @@ def walk_stored_values(db: MooDatabase, skip: Callable[[str], bool] | None = Non
 
 
 @attrs.frozen
+class MaterialSpeciesRef:
+    """One stored material species name: a component of a material record, or a form use's form-material."""
+
+    obj: MooObject
+    where: str
+    species: str
+    kind: str  # "component" (a record's components[i]["species"]) or "form-material" (.parts[i][3]["material"])
+
+
+def material_species_refs(db: MooDatabase) -> Iterator[MaterialSpeciesRef]:
+    """Every species name a material record or a construction form's form-material names.
+
+    A component is a string at ``...["components"][i]["species"]`` anywhere in a stored value (material
+    declarations in ``.capabilities``, records kept in waifs and properties). A form-material is the
+    string at ``.parts[i][3]["material"]`` (``$blueprint:configure_form`` form-material).
+    """
+    for v in walk_stored_values(db):
+        if not isinstance(v.value, str) or not v.steps:
+            continue
+        last = v.steps[-1]
+        if last.kind != "key":
+            continue
+        if last.key == "species" and len(v.steps) >= 3 and v.steps[-2].kind == "index" and v.steps[-3] == ValueStep("key", "components"):
+            yield MaterialSpeciesRef(v.obj, v.where, v.value, "component")
+        elif last.key == "material" and v.steps[0] == ValueStep("prop", "parts") and len(v.steps) == 4 \
+                and v.steps[1].kind == "index" and v.steps[2] == ValueStep("index", 3):
+            yield MaterialSpeciesRef(v.obj, v.where, v.value, "form-material")
+
+
+@attrs.frozen
+class MaterialSpeciesName:
+    """One stored species name of one kind, with everything that names it and how the engine resolves it."""
+
+    species: str
+    kind: str
+    refs: tuple[MaterialSpeciesRef, ...]
+    canonical: str  # after $material_engine.species_aliases
+    known: bool  # canonical has a profile, or a form-material names a family
+
+
+def material_species_names(db: MooDatabase, engine: MooObject) -> list[MaterialSpeciesName]:
+    """Every species name ``material_species_refs`` finds, resolved against ENGINE ($material_engine).
+
+    Resolution follows ``$material_engine:canonical_species``: ``.species_aliases`` then ``.profiles``,
+    both looked up case-insensitively like MOO MAP string keys. A form-material may also name a family
+    (a key of ``.family_species``), as ``$blueprint:configure_form`` allows. Sorted by kind, then name.
+    """
+    aliases = {str(k).lower(): v for k, v in (property_value(db, engine, "species_aliases") or {}).items()}
+    profiles = {str(k).lower() for k in (property_value(db, engine, "profiles") or {})}
+    families = {str(k).lower() for k in (property_value(db, engine, "family_species") or {})}
+    found: dict[tuple[str, str], list[MaterialSpeciesRef]] = {}
+    for ref in material_species_refs(db):
+        found.setdefault((ref.species, ref.kind), []).append(ref)
+    out = []
+    for (species, kind), refs in sorted(found.items(), key=lambda kv: (kv[0][1], kv[0][0].lower(), kv[0][0])):
+        alias = aliases.get(species.lower())
+        canonical = alias if isinstance(alias, str) else species
+        known = canonical.lower() in profiles or (kind == "form-material" and species.lower() in families)
+        out.append(MaterialSpeciesName(species, kind, tuple(refs), canonical, known))
+    return out
+
+
+@attrs.frozen
 class WaifSlotSpec:
     """A waif slot to read: ``name``, ``name[N]`` (1-based list element) or either followed by ``?`` (MOO truth)."""
 
