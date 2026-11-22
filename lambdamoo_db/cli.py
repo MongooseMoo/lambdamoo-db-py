@@ -27,6 +27,9 @@ from .inspection import (
     defined_property_names,
     descendants,
     dollar_names,
+    effective_values,
+    moo_truth,
+    property_value,
     find_references,
     find_slot,
     CATALOG_ID_KINDS,
@@ -788,6 +791,41 @@ def obj(ctx: click.Context, ref: str) -> None:
         click.echo(f"  .{p.propertyName}  {property_perms(p)}  owner #{int(p.owner)}  = {format_value(p.value, 100)}")
 
 
+def _by_ancestor(db, names: dict[int, str], hits, shown: tuple[str, ...], examples: int, limit: int | None) -> None:
+    """Print the objects of ``hits`` grouped by their nearest $-named ancestor (themselves included), largest first.
+
+    Each ``shown`` property is given as the group's commonest effective value and each example's.
+    """
+    groups: dict[int | None, list] = {}
+    seen: set[int] = set()
+    for h in hits:
+        if h.obj.id in seen:
+            continue
+        seen.add(h.obj.id)
+        family = next((a.id for a in db.ancestors(h.obj) if a.id in names), None)
+        groups.setdefault(family, []).append(h.obj)
+    memos: dict[str, dict] = {p: {} for p in shown}
+
+    def value(obj, prop: str) -> str:
+        if prop.lower() in BUILTIN_PROPS:
+            return format_value(property_value(db, obj, prop), limit)
+        try:
+            return format_value(lookup_property(db, obj, prop, memos[prop]).value, limit)
+        except LookupFailed:  # one object without the property; the rest still answer
+            return "none"
+
+    click.echo(f"{len(seen)} objects in {len(groups)} groups by nearest registered ancestor")
+    for family, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), -1 if kv[0] is None else kv[0])):
+        head = label(db, family, names) if family is not None else "(no registered ancestor)"
+        common = ""
+        for prop in shown:
+            (text, n), = Counter(value(m, prop) for m in members).most_common(1)
+            common += f"  .{prop} mostly {text} x{n}"
+        listed = ", ".join(f"#{m.id} {moo_string(m.name)}" + "".join(f" {value(m, p)}" for p in shown)
+                           for m in members[:examples])
+        click.echo(f"{len(members):>7}  {head}{common}  e.g. {listed}")
+
+
 @moodb.command()
 @click.argument("ref")
 @click.option("--full", is_flag=True, help="Do not truncate long values.")
@@ -800,10 +838,31 @@ def obj(ctx: click.Context, ref: str) -> None:
               help="With -r: one line per distinct name and value, with how many objects hold it and the first five.")
 @click.option("--largest", type=int, metavar="N",
               help="Only the N stored (not clear) values taking the most bytes in the dump, largest first.")
+@click.option("--effective", is_flag=True,
+              help="With -r: every descendant's effective value (clear followed), not only values it stores.")
+@click.option("--skip-under", "skip_under", multiple=True, metavar="REF",
+              help="With --effective: leave out REF and its descendants (repeatable).")
+@click.option("--located-in", "located", metavar="CLASS",
+              help="With --effective: only objects whose location, or a location holding it however deep, "
+                   "is CLASS or a descendant of CLASS.")
+@click.option("--truth", type=click.Choice(["true", "false"]),
+              help="With --effective: only values that are MOO-true (or MOO-false: 0, \"\", {}, [], objects, errors).")
+@click.option("--by-ancestor", "by_ancestor", is_flag=True,
+              help="With --effective: one line per nearest registered ($-named) ancestor, the object itself "
+                   "included, with how many objects it covers, largest first.")
+@click.option("--show", "shown", multiple=True, metavar="PROP",
+              help="With --by-ancestor: each group's commonest effective PROP value, and each example's (repeatable).")
+@click.option("--examples", default=3, show_default=True, help="With --by-ancestor: example objects per group.")
 @click.pass_context
 def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[str, ...], recursive: bool,
-          group: bool, largest: int | None) -> None:
-    """List every property of an object, own and inherited, with effective values."""
+          group: bool, largest: int | None, effective: bool, skip_under: tuple[str, ...], located: str | None,
+          truth: str | None, by_ancestor: bool, shown: tuple[str, ...], examples: int) -> None:
+    """List every property of an object, own and inherited, with effective values.
+
+    With -r --effective, one walk resolves every descendant's inherited value:
+    `props '$gpo' -r --effective --name construction_form --skip-under '$room'
+    --truth false --by-ancestor --show dimensions`.
+    """
     db, names = _db(ctx)
     o = _object(db, ref)
     limit = None if full else 100
@@ -811,6 +870,13 @@ def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[
 
     def wanted(name: str) -> bool:
         return not patterns or any(fnmatchcase(name.lower(), g) for g in patterns)
+
+    if (skip_under or located or truth or by_ancestor) and not effective:
+        raise click.UsageError("--skip-under, --located-in, --truth and --by-ancestor need --effective")
+    if (shown or examples != 3) and not by_ancestor:
+        raise click.UsageError("--show and --examples need --by-ancestor")
+    if effective and not recursive:
+        raise click.UsageError("--effective needs -r")
 
     if largest is not None:
         from io import StringIO
@@ -829,8 +895,18 @@ def props(ctx: click.Context, ref: str, full: bool, builtin: bool, globs: tuple[
     if group and not recursive:
         raise click.UsageError("--group needs -r")
     if recursive:
-        rows = [(o, h.name, h.value) for h in all_properties(db, o) if wanted(h.name)]
-        rows += [(d, name, value) for d in descendants(db, o) for name, value in stored_properties(db, d) if wanted(name)]
+        if effective:
+            hits = effective_values(db, o, wanted, skip_under=[_object(db, r) for r in skip_under],
+                                    within=_object(db, located) if located else None)
+            if truth:
+                hits = (h for h in hits if moo_truth(h.hit.value) == (truth == "true"))
+            if by_ancestor:
+                _by_ancestor(db, names, hits, shown, examples, limit)
+                return
+            rows = [(h.obj, h.hit.name, h.hit.value) for h in hits]
+        else:
+            rows = [(o, h.name, h.value) for h in all_properties(db, o) if wanted(h.name)]
+            rows += [(d, name, value) for d in descendants(db, o) for name, value in stored_properties(db, d) if wanted(name)]
         if group:
             holders: dict[tuple[str, str], list[int]] = {}
             for holder, name, value in rows:
