@@ -611,11 +611,14 @@ class PropertyHit:
     value_from: MooObject  # the object whose slot holds the value
 
 
-def lookup_property(db: MooDatabase, obj: MooObject, name: str) -> PropertyHit:
+def lookup_property(db: MooDatabase, obj: MooObject, name: str,
+                    memo: dict[tuple[int, str], tuple[Any, MooObject]] | None = None) -> PropertyHit:
     """Find a non-builtin property and its effective value, following ``clear`` like the server.
 
     A clear slot takes its value from the first parent that has the definer as
-    an ancestor, repeatedly (db_find_property's clear loop).
+    an ancestor, repeatedly (db_find_property's clear loop). ``memo``, shared
+    across calls for many objects, keeps each object's (value, holder) so a
+    walk over a whole family follows each clear chain once.
     """
     found = find_slot(db, obj, name)
     if found is None:
@@ -624,16 +627,25 @@ def lookup_property(db: MooDatabase, obj: MooObject, name: str) -> PropertyHit:
     if found.index >= len(obj.properties):
         raise LookupFailed(f"#{obj.id} has no slot {found.index} for .{name} (inconsistent dump)")
     slot = obj.properties[found.index]
+    key = name.lower()
     holder, value = obj, slot.value
+    chain = [obj]
     while value is CLEAR:
         parent = next((p for p in (db.objects.get(int(x)) for x in holder.parents)
                        if p is not None and any(a is definer for a in db.ancestors(p))), None)
         if parent is None:
             break
+        if memo is not None and (parent.id, key) in memo:
+            value, holder = memo[(parent.id, key)]
+            break
         where = find_slot(db, parent, name)
         if where is None or where.index >= len(parent.properties):
             break
         holder, value = parent, parent.properties[where.index].value
+        chain.append(holder)
+    if memo is not None:
+        for o in chain:
+            memo[(o.id, key)] = (value, holder)
     return PropertyHit(own_name(definer, name), definer, slot, value, holder)
 
 
@@ -665,6 +677,64 @@ def stored_properties(db: MooDatabase, obj: MooObject) -> Iterator[tuple[str, An
             if index < len(obj.properties) and isinstance(p.propertyName, str) and obj.properties[index].value is not CLEAR:
                 yield p.propertyName, obj.properties[index].value
             index += 1
+
+
+def located_in(db: MooDatabase, obj: MooObject, cls: MooObject, memo: dict[int, bool] | None = None) -> bool:
+    """Whether obj's location, or a location holding that however deep, is ``cls`` or a descendant of it.
+
+    ``memo``, shared across calls, keeps the answer for every location already walked.
+    """
+    memo = {} if memo is None else memo
+    chain: list[int] = []
+    result = False
+    where = db.objects.get(int(obj.location))
+    while where is not None and where.id not in chain:
+        if where.id in memo:
+            result = memo[where.id]
+            break
+        chain.append(where.id)
+        if any(a.id == cls.id for a in db.ancestors(where)):
+            result = True
+            break
+        where = db.objects.get(int(where.location))
+    for oid in chain:
+        memo[oid] = result
+    return result
+
+
+def effective_values(
+    db: MooDatabase,
+    root: MooObject,
+    wanted: Callable[[str], bool],
+    *,
+    skip_under: Sequence[MooObject] = (),
+    within: MooObject | None = None,
+) -> Iterator["EffectiveHit"]:
+    """Root's and every descendant's effective value of each property whose name ``wanted`` accepts.
+
+    One walk: clear slots are followed once per object and property (``lookup_property``'s memo).
+    ``skip_under`` leaves out those objects and their descendants; ``within`` keeps only objects
+    ``located_in`` it.
+    """
+    skipped = {s.id for s in skip_under} | {d.id for s in skip_under for d in descendants(db, s)}
+    matching: dict[int, list[str]] = {}  # names each definer defines that wanted accepts
+    memo: dict[tuple[int, str], tuple[Any, MooObject]] = {}
+    places: dict[int, bool] = {}
+    for o in (root, *descendants(db, root)):
+        if o.id in skipped or (within is not None and not located_in(db, o, within, places)):
+            continue
+        for a in db.ancestors(o):
+            if a.id not in matching:
+                matching[a.id] = [p.propertyName for p in own_properties(a)
+                                  if isinstance(p.propertyName, str) and wanted(p.propertyName)]
+            for name in matching[a.id]:
+                yield EffectiveHit(o, lookup_property(db, o, name, memo))
+
+
+@attrs.frozen
+class EffectiveHit:
+    obj: MooObject  # the object whose effective value this is
+    hit: PropertyHit
 
 
 # --------------------------------------------------------------------------
