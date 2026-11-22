@@ -44,6 +44,7 @@ from .inspection import (
     grep_verbs,
     label,
     lookup_property,
+    material_species_names,
     moo_string,
     object_heads,
     object_continuity,
@@ -1653,6 +1654,33 @@ def values(ctx: click.Context, pattern: str, ignore_case: bool, fixed_strings: b
         if wanted is not None and not wanted.intersection(hit.waif_classes):
             continue
         click.echo(f"{label(db, hit.obj.id, names)}{hit.where} = {moo_string(hit.value)}")
+
+
+@moodb.command("material-species")
+@click.option("--unknown", is_flag=True, help="Only names $material_engine has no profile for (a form-material may also name a family).")
+@click.option("--each", is_flag=True, help="List every holder, not only a count per name.")
+@click.pass_context
+def material_species(ctx: click.Context, unknown: bool, each: bool) -> None:
+    """Species named by material records and form-material settings, resolved as the MOO resolves them.
+
+    A record component is any `components[i]["species"]` string in a stored value; a form-material is
+    `.parts[i][3]["material"]`. A name resolves through `$material_engine.species_aliases`, then
+    `.profiles`, both case-insensitive like MOO MAP keys (`$material_engine:canonical_species`); a
+    form-material may instead name a family (`.family_species`). Prints one line per name with its
+    count of holders and whether it resolves; --each adds the holders.
+    """
+    db, names = _db(ctx)
+    engine_id = _system_object(db, "material_engine")
+    if engine_id is None:
+        raise click.ClickException("#0 has no $material_engine")
+    for row in material_species_names(db, db.objects[engine_id]):
+        if unknown and row.known:
+            continue
+        click.echo(f"{row.kind:13s} {moo_string(row.species)}  {len(row.refs)} holders  {'known' if row.known else 'NO PROFILE'}"
+                   + (f" (alias of {moo_string(row.canonical)})" if row.canonical != row.species else ""))
+        if each:
+            for r in row.refs:
+                click.echo(f"    {label(db, r.obj.id, names)}{r.where}")
 
 
 @moodb.command()
