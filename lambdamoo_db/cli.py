@@ -2334,6 +2334,10 @@ from .remote_cli import register_remote
 
 register_remote(moodb)
 
+from .audit_cli import register_audit
+
+register_audit(moodb, _db)
+
 
 @moodb.command()
 @click.argument("other", type=click.Path(exists=True, dir_okay=False))

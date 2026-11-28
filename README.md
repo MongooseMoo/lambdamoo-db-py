@@ -72,6 +72,7 @@ the traversal with a lookup error; no expressions or verbs are evaluated.
 | `prop SPEC... [--full]` | effective property values as MOO literals, naming the definer when inherited |
 | `grep PATTERN [-o REF] [-i] [-F] [-l] [-C N]` | Python regex over all verb code; `-o` limits to objects, `-l` lists verbs once, `-C` adds context |
 | `added OLD [PATTERN] [-i] [-F] [-l]` | added or replaced verb code lines relative to OLD; optional Python regex, `-F` for literal text, `-l` for counts per verb |
+| `audit [OLD] [--rules FILE] [-o REF [--descendants]] [--existing] [--author TEXT] [--since YYYY-MM-DD] [--check NAME]... [--format text\|json]` | static code-quality and design-rule audit over verb changes between OLD and `--db` (or directly over `--db`); built-in MOO checks (`raw-refs`, `catches`, `docstrings`, `security`, `duplicates`) plus declarative JSON rules (`line_rules`, `verb_rules`, `boundary_rules`, `object_rules`) |
 | `find TEXT` | objects whose name or `$name` contains TEXT |
 | `find --verb NAME` | objects defining a verb that a call to NAME would match, waif class verbs (stored as `:NAME`) included |
 | `find --prop NAME` | objects defining a property called NAME |
@@ -492,6 +493,39 @@ those.
 Without `-o`, both dumps are parsed whole even when they have an offset index:
 the index records where each object and verb program is, not which objects
 define properties. With `-o`, only those objects and their ancestors are read.
+
+### Auditing verb code with declarative rules
+
+```sh
+moodb --db new.db audit old.db                                  # built-in MOO checks only
+moodb --db new.db audit old.db --rules rules.json               # built-ins + declarative project rules
+moodb --db new.db audit old.db --rules rules.json --check catches --check security
+moodb --db new.db audit -o '$room' --descendants --since 2026-11-21 --rules rules.json
+moodb --db new.db audit old.db --rules rules.json --format json
+```
+
+`audit` inspects verb changes between `OLD` and `--db` (skipping `Last modified`-only
+saves, pairing verbs the way `diff --plain` does) or verbs directly in `--db` when
+`OLD` is omitted. Set `MOODB_AUDIT_RULES` to supply `--rules` by default.
+
+Without `--rules`, five world-agnostic LambdaMOO/ToastStunt checks run:
+- `raw-refs`: hardcoded `#N` object literals in masked production code (excluding `#0`).
+- `catches`: broad `except ... ANY` / `` `... ! ANY' `` catches vs specific catches (and catches inside test verbs).
+- `docstrings`: leading string-statement docstring line count on every added and revised verb (default `--doc-lines 3`), with per-author breakdown.
+- `security`: wizard-owned executable (`x`, `this none this`) verbs calling state-mutating builtins without an obvious caller/permission guard (owner wizard flags are read from the dump).
+- `duplicates`: identical non-trivial added production verb bodies across two or more distinct objects.
+
+A `--rules` JSON document (`"version": 1`) layers project-specific rules on top
+without hardcoding world conventions into `moodb`:
+- Top-level settings: `name`, `min_doc_lines`, `min_duplicate_lines`, `test_verb_prefixes`, `test_object_substrings`, `author_groups` (`[{"pattern", "label"}]`), `wizard_mutators`, `wizard_guards`.
+- `line_rules`: pattern checks over added/replaced lines (`id`, `category`, `scope`: `prod|test|all`, `match`, optional `exclude_line`, `exclude_verbs`, `code_only`, `ignore_case`, `mode`: `finding|metric`, `count_by`: `line|verb`).
+- `verb_rules`: whole-verb checks (`id`, `category`, `scope`, `change`: `added|changed|all`, optional `args_is`, `args_not`, `name_match`, `require`, `without`, `code_only`).
+- `boundary_rules`: flags non-allowed `$name` references added inside listed boundary `objects` (`id`, `category`, `objects`, `allowed_refs`).
+- `object_rules`: checks newly added/reused objects (or explicit `-o` targets) for fertility, `$name` registration, or forbidden own properties (`id`, `category`, `when_name_contains`, `or_fertile`, `or_has_children`, `exclude_name_contains`, `exclude_name_prefixes`, `require_fertile`, `require_dollar_name`, `forbid_own_properties`).
+
+Use `--check NAME` (repeatable) to select any built-in check, rule `id`, or rule
+`category`. Findings are static lexical heuristics meant to focus review and live
+verification, not proof of runtime execution or authorization.
 
 ### Lookup rules
 
